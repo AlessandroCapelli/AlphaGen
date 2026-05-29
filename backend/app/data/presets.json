@@ -1,0 +1,254 @@
+[
+	{
+		"id": "covid",
+		"name": "COVID-19",
+		"description": "SARS-CoV-2 (ceppo ancestrale): R₀ ~3, incubazione ~5 giorni, letalità ~1%.",
+		"params": {
+			"r0": 3.0,
+			"incubation_days": 5.0,
+			"infectious_days": 10.0,
+			"fatality_rate": 0.01,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "covid_omicron",
+		"name": "COVID-19 (Omicron)",
+		"description": "Variante Omicron: molto più trasmissibile (R₀ effettivo ~9-10), incubazione ~3 giorni, letalità ridotta dall'immunità.",
+		"params": {
+			"r0": 9.5,
+			"incubation_days": 3.0,
+			"infectious_days": 7.0,
+			"fatality_rate": 0.002,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "flu",
+		"name": "Influenza stagionale",
+		"description": "R₀ ~1,3, incubazione ~2 giorni, letalità ~0,1%.",
+		"params": {
+			"r0": 1.4,
+			"incubation_days": 2.0,
+			"infectious_days": 5.0,
+			"fatality_rate": 0.001,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "spanish_flu",
+		"name": "Influenza spagnola (1918)",
+		"description": "Pandemia H1N1 del 1918: R₀ ~2, letalità ~2,5%, particolarmente grave nei giovani adulti.",
+		"params": {
+			"r0": 2.0,
+			"incubation_days": 2.0,
+			"infectious_days": 5.0,
+			"fatality_rate": 0.025,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "cold",
+		"name": "Raffreddore comune",
+		"description": "Rhinovirus: trasmissibile (R₀ ~2-3) ma quasi mai letale.",
+		"params": {
+			"r0": 2.5,
+			"incubation_days": 2.0,
+			"infectious_days": 7.0,
+			"fatality_rate": 0.0001,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "sars",
+		"name": "SARS (2003)",
+		"description": "Coronavirus SARS-CoV-1: R₀ ~2-3, incubazione ~5 giorni, letalità ~10%.",
+		"params": {
+			"r0": 2.5,
+			"incubation_days": 5.0,
+			"infectious_days": 10.0,
+			"fatality_rate": 0.1,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "mers",
+		"name": "MERS",
+		"description": "Coronavirus MERS-CoV: R₀ <1 (i focolai tendono a spegnersi) ma letalità molto alta (~35%).",
+		"params": {
+			"r0": 0.9,
+			"incubation_days": 5.0,
+			"infectious_days": 10.0,
+			"fatality_rate": 0.34,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "measles",
+		"name": "Morbillo",
+		"description": "Tra i virus più contagiosi (R₀ ~12-18), incubazione ~12 giorni.",
+		"params": {
+			"r0": 14.0,
+			"incubation_days": 12.0,
+			"infectious_days": 8.0,
+			"fatality_rate": 0.002,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "mumps",
+		"name": "Parotite (orecchioni)",
+		"description": "R₀ ~5-7, incubazione lunga (~17 giorni), letalità trascurabile.",
+		"params": {
+			"r0": 5.5,
+			"incubation_days": 17.0,
+			"infectious_days": 7.0,
+			"fatality_rate": 0.0001,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "rubella",
+		"name": "Rosolia",
+		"description": "R₀ ~6, incubazione ~14 giorni; pericolosa in gravidanza (rosolia congenita).",
+		"params": {
+			"r0": 6.0,
+			"incubation_days": 14.0,
+			"infectious_days": 7.0,
+			"fatality_rate": 0.0005,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "chickenpox",
+		"name": "Varicella",
+		"description": "Molto contagiosa (R₀ ~10), incubazione ~14 giorni, letalità bassa.",
+		"params": {
+			"r0": 10.0,
+			"incubation_days": 14.0,
+			"infectious_days": 7.0,
+			"fatality_rate": 0.0005,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "pertussis",
+		"name": "Pertosse (tosse convulsa)",
+		"description": "R₀ ~5,5, incubazione ~9 giorni, periodo infettivo lungo (~3 settimane).",
+		"params": {
+			"r0": 5.5,
+			"incubation_days": 9.0,
+			"infectious_days": 21.0,
+			"fatality_rate": 0.002,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "diphtheria",
+		"name": "Difterite",
+		"description": "R₀ ~6, incubazione breve (~3 giorni), letalità ~5-10%.",
+		"params": {
+			"r0": 6.0,
+			"incubation_days": 3.0,
+			"infectious_days": 14.0,
+			"fatality_rate": 0.07,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "smallpox",
+		"name": "Vaiolo",
+		"description": "Eradicato nel 1980: R₀ ~5-7, incubazione ~12 giorni, letalità ~30%.",
+		"params": {
+			"r0": 6.0,
+			"incubation_days": 12.0,
+			"infectious_days": 9.0,
+			"fatality_rate": 0.3,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "ebola",
+		"name": "Ebola (EVD)",
+		"description": "R₀ ~2, incubazione ~9 giorni, letalità ~50%; trasmissione per contatto.",
+		"params": {
+			"r0": 1.8,
+			"incubation_days": 9.0,
+			"infectious_days": 10.0,
+			"fatality_rate": 0.5,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "mpox",
+		"name": "Mpox (vaiolo delle scimmie)",
+		"description": "Clade IIb (2022): R₀ ~1,5-2, periodo infettivo lungo, letalità bassa.",
+		"params": {
+			"r0": 1.6,
+			"incubation_days": 8.0,
+			"infectious_days": 21.0,
+			"fatality_rate": 0.001,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "cholera",
+		"name": "Colera",
+		"description": "Vibrio cholerae: incubazione ~2 giorni; letalità alta se non trattato, bassa con reidratazione.",
+		"params": {
+			"r0": 2.5,
+			"incubation_days": 2.0,
+			"infectious_days": 5.0,
+			"fatality_rate": 0.02,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	},
+	{
+		"id": "severe",
+		"name": "Patogeno severo (ipotetico)",
+		"description": "Scenario di stress-test: alta trasmissibilità e letalità elevata.",
+		"params": {
+			"r0": 4.0,
+			"incubation_days": 4.0,
+			"infectious_days": 9.0,
+			"fatality_rate": 0.06,
+			"vaccination_rate": 0.0,
+			"intervention": 0.0,
+			"mobility": 1.0
+		}
+	}
+]

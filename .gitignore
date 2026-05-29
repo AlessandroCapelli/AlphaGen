@@ -1,0 +1,29 @@
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log
+yarn-error.log
+
+# Python (backend)
+__pycache__/
+*.py[cod]
+.venv/
+build/
+wheels/
+*.egg-info/
+
+# Node / Angular (frontend)
+node_modules/
+dist/
+/tmp
+/out-tsc
+.angular/
+.sass-cache/
+
+# Editors / IDEs
+.idea/
+.history/
+*.sublime-workspace
