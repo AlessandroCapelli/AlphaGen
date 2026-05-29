@@ -25,7 +25,7 @@ import { SimulationService } from './app/simulation.service';
       <header>
         <h1><img class="logo" src="favicon.svg" alt="" /> AlphaGen</h1>
         <span class="status" [class.on]="sim.connected()">
-          {{ sim.connected() ? '● connesso' : '○ disconnesso' }}
+          {{ sim.connected() ? 'connesso' : 'disconnesso' }}
         </span>
       </header>
 

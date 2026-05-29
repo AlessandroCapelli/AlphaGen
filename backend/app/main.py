@@ -34,7 +34,7 @@ from pathlib import Path
 
 from app.models import CountryMeta, Params, Preset
 from app.simulation import SimulationEngine
-from fastapi import FastAPI, HTTPException, Query, WebSocket
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -206,8 +206,13 @@ def get_presets() -> list[Preset]:
 
 
 @app.get("/api/scenario", tags=["scenarios"])
-def export_scenario(name: str = Query("scenario")) -> dict:
-    """Return the current setup (params + speed + seeds) as a JSON scenario."""
+async def export_scenario(name: str = Query("scenario")) -> dict:
+    """Return the current full state as a JSON scenario.
+
+    Declared ``async`` on purpose: it reads the live compartment arrays, so it
+    must run on the event loop (atomically w.r.t. the simulation loop) rather
+    than in the threadpool, where it could race with an in-flight step.
+    """
     return get_engine().to_scenario(name)
 
 
@@ -230,6 +235,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     try:
         while True:
             msg = await ws.receive_json()
-            await _handle_command(msg, eng, mgr)
-    except Exception:
+            try:
+                await _handle_command(msg, eng, mgr)
+            except Exception:
+                # A single malformed command must not drop the connection.
+                pass
+    except WebSocketDisconnect:
+        pass
+    finally:
         mgr.disconnect(ws)

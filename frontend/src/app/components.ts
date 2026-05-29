@@ -21,18 +21,33 @@ import { SimulationService } from './simulation.service';
    ============================================================ */
 
 /**
- * Map an active-case fraction to a choropleth colour (sequential reds).
+ * Map an active-case fraction to a heat colour (amber -> crimson).
  *
  * @param ratio Active cases (E + I) divided by population, in [0, 1].
  * @returns A hex colour string.
  */
-function colorFor(ratio: number): string {
-  if (ratio <= 0) return '#26323f';
-  if (ratio < 1e-5) return '#fee0d2';
-  if (ratio < 1e-4) return '#fcae91';
-  if (ratio < 1e-3) return '#fb6a4a';
-  if (ratio < 1e-2) return '#de2d26';
-  return '#a50f15';
+function heatColor(ratio: number): string {
+  if (ratio <= 0) return '#1b2733';
+  if (ratio < 1e-5) return '#fde68a';
+  if (ratio < 1e-4) return '#fbbf24';
+  if (ratio < 1e-3) return '#fb923c';
+  if (ratio < 1e-2) return '#f43f5e';
+  return '#b91c1c';
+}
+
+/**
+ * Fill opacity grows with the active-case fraction so hot zones stand out
+ * against the dark base map.
+ *
+ * @param ratio Active cases (E + I) divided by population, in [0, 1].
+ */
+function heatOpacity(ratio: number): number {
+  if (ratio <= 0) return 0.06;
+  if (ratio < 1e-5) return 0.35;
+  if (ratio < 1e-4) return 0.55;
+  if (ratio < 1e-3) return 0.72;
+  if (ratio < 1e-2) return 0.85;
+  return 0.95;
 }
 
 /**
@@ -49,12 +64,12 @@ function colorFor(ratio: number): string {
       <div #mapEl class="map"></div>
       <div class="legend">
         <span class="title">Casi attivi</span>
-        <span><i style="background:#26323f"></i>0</span>
-        <span><i style="background:#fee0d2"></i>&lt;0.001%</span>
-        <span><i style="background:#fcae91"></i>&lt;0.01%</span>
-        <span><i style="background:#fb6a4a"></i>&lt;0.1%</span>
-        <span><i style="background:#de2d26"></i>&lt;1%</span>
-        <span><i style="background:#a50f15"></i>≥1%</span>
+        <span><i style="background:#1b2733"></i>0</span>
+        <span><i style="background:#fde68a"></i>&lt;0.001%</span>
+        <span><i style="background:#fbbf24"></i>&lt;0.01%</span>
+        <span><i style="background:#fb923c"></i>&lt;0.1%</span>
+        <span><i style="background:#f43f5e"></i>&lt;1%</span>
+        <span><i style="background:#b91c1c"></i>≥1%</span>
       </div>
     </div>
   `,
@@ -79,7 +94,10 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         const id = typeof feat?.id === 'string' ? feat.id : '';
         const c = byIso.get(id);
         const ratio = c && c.population > 0 ? (c.e + c.i) / c.population : 0;
-        (layer as L.Path).setStyle({ fillColor: colorFor(ratio) });
+        (layer as L.Path).setStyle({
+          fillColor: heatColor(ratio),
+          fillOpacity: heatOpacity(ratio),
+        });
 
         const name = (feat?.properties as { name?: string })?.name ?? '';
         const infected = c ? Math.round(c.e + c.i) : 0;
@@ -94,23 +112,29 @@ export class WorldMap implements AfterViewInit, OnDestroy {
   async ngAfterViewInit(): Promise<void> {
     const map = L.map(this.mapEl().nativeElement, {
       center: [25, 10],
-      zoom: 2,
+      zoom: 2.4,
       minZoom: 2,
       maxZoom: 6,
+      zoomSnap: 0.5,
       worldCopyJump: true,
-      attributionControl: false,
       zoomControl: true,
       preferCanvas: true,
     });
     this.map = map;
 
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      subdomains: 'abcd',
+      maxZoom: 8,
+    }).addTo(map);
+
     const geojson = (await this.sim.getGeoJson()) as GeoJSON.GeoJsonObject;
     this.geoLayer = L.geoJSON(geojson, {
       style: () => ({
-        weight: 0.6,
-        color: '#0f1419',
-        fillColor: '#26323f',
-        fillOpacity: 0.9,
+        weight: 0.5,
+        color: 'rgba(150, 170, 205, 0.35)',
+        fillColor: '#1b2733',
+        fillOpacity: 0.06,
       }),
       onEachFeature: (feature, layer) => this.bindFeature(feature, layer),
     }).addTo(map);
@@ -129,10 +153,12 @@ export class WorldMap implements AfterViewInit, OnDestroy {
 
     layer.on({
       mouseover: (e) => {
-        (e.target as L.Path).setStyle({ weight: 2, color: '#4ea1ff' });
+        const t = e.target as L.Path;
+        t.setStyle({ weight: 1.6, color: '#eef2f9' });
+        t.bringToFront();
       },
       mouseout: (e) => {
-        (e.target as L.Path).setStyle({ weight: 0.6, color: '#0f1419' });
+        (e.target as L.Path).setStyle({ weight: 0.5, color: 'rgba(150, 170, 205, 0.35)' });
       },
       click: () => {
         if (iso) this.sim.seed(iso, this.sim.seedCount());
@@ -160,12 +186,18 @@ export class WorldMap implements AfterViewInit, OnDestroy {
 
 /** Chart series: which `Totals` key to plot, its label and colour. */
 const SERIES = [
-  { key: 'e', name: 'Esposti', color: '#f0a020' },
-  { key: 'i', name: 'Infetti', color: '#ef4444' },
-  { key: 'r', name: 'Guariti', color: '#22c55e' },
-  { key: 'd', name: 'Deceduti', color: '#9ca3af' },
-  { key: 'v', name: 'Vaccinati', color: '#a855f7' },
+  { key: 'e', name: 'Esposti', color: '#fbbf24' },
+  { key: 'i', name: 'Infetti', color: '#f43f5e' },
+  { key: 'r', name: 'Guariti', color: '#34d399' },
+  { key: 'd', name: 'Deceduti', color: '#94a3b8' },
+  { key: 'v', name: 'Vaccinati', color: '#a78bfa' },
 ] as const;
+
+/** Convert a `#rrggbb` colour to an rgba string with the given alpha. */
+function fade(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 
 /**
  * Time-series chart of worldwide compartment totals.
@@ -210,41 +242,60 @@ export class EpiChart implements AfterViewInit, OnDestroy {
     this.chart = chart;
     chart.setOption({
       backgroundColor: 'transparent',
-      grid: { left: 56, right: 16, top: 36, bottom: 28 },
+      grid: { left: 58, right: 18, top: 42, bottom: 30 },
       tooltip: {
         trigger: 'axis',
-        backgroundColor: '#1a212b',
-        borderColor: '#2e3a48',
-        textStyle: { color: '#e6edf3' },
+        backgroundColor: 'rgba(16, 22, 36, 0.95)',
+        borderColor: 'rgba(120, 140, 175, 0.32)',
+        borderWidth: 1,
+        textStyle: { color: '#eef2f9', fontFamily: 'Inter' },
+        axisPointer: {
+          type: 'line',
+          lineStyle: { color: 'rgba(150, 170, 205, 0.35)', type: 'dashed' },
+        },
       },
       legend: {
-        textStyle: { color: '#8b98a9' },
-        top: 4,
+        textStyle: { color: '#93a0b8', fontFamily: 'Inter', padding: [0, 0, 0, 4] },
+        icon: 'roundRect',
+        itemWidth: 14,
+        itemHeight: 4,
+        itemGap: 22,
+        top: 8,
       },
       xAxis: {
         type: 'category',
+        boundaryGap: false,
         name: 'giorni',
-        nameTextStyle: { color: '#8b98a9' },
-        axisLine: { lineStyle: { color: '#2e3a48' } },
-        axisLabel: { color: '#8b98a9' },
+        nameTextStyle: { color: '#5f6c82' },
+        axisLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.2)' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#5f6c82' },
         data: [],
       },
       yAxis: {
         type: 'value',
-        axisLine: { lineStyle: { color: '#2e3a48' } },
-        splitLine: { lineStyle: { color: '#1f2730' } },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.1)' } },
         axisLabel: {
-          color: '#8b98a9',
+          color: '#5f6c82',
           formatter: (v: number) => this.compact(v),
         },
       },
+      animationDuration: 300,
       series: SERIES.map((s) => ({
         name: s.name,
         type: 'line',
         showSymbol: false,
         smooth: true,
-        lineStyle: { width: 2, color: s.color },
+        lineStyle: { width: 2.5, color: s.color },
         itemStyle: { color: s.color },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: fade(s.color, 0.35) },
+            { offset: 1, color: fade(s.color, 0) },
+          ]),
+        },
         data: [],
       })),
     });

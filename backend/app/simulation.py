@@ -170,9 +170,13 @@ class SeirModel:
         imported_force = p.mobility * (self.W @ prevalence)
         lam = local_force + imported_force
 
+        # Cap every transition to the people actually available in the source
+        # compartment. This keeps the model conservative (no negative
+        # compartments, no double-counting into R/D) even when a rate exceeds 1,
+        # e.g. with very short incubation/infectious periods set via the API.
         new_e = np.minimum(lam * self.S, self.S)
-        new_i = sigma * self.E
-        leaving_i = gamma * self.I
+        new_i = np.minimum(sigma * self.E, self.E)
+        leaving_i = np.minimum(gamma * self.I, self.I)
         new_d = p.fatality_rate * leaving_i
         new_r = leaving_i - new_d
         # Vaccinate susceptibles, but never more than remain after new exposures.
