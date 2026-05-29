@@ -111,14 +111,27 @@ export interface HistoryPoint {
   totals: Totals;
 }
 
-/** A saved scenario: enough state to reproduce a run from day 0. */
+/** A saved simulation: the full live state, restorable exactly. */
 export interface Scenario {
   /** Scenario label. */
   name: string;
+  /** Simulated day to restore. */
+  day: number;
   /** Parameters to restore. */
   params: Params;
   /** Auto-advance speed to restore. */
   speed: number;
-  /** Initial outbreaks to replay (country + count). */
-  seeds: { iso: string; count: number }[];
+  /**
+   * Compartment counts of the affected countries; any country not listed is
+   * restored as fully susceptible (S = N).
+   */
+  countries: {
+    iso: string;
+    s: number;
+    e: number;
+    i: number;
+    r: number;
+    d: number;
+    v: number;
+  }[];
 }

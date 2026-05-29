@@ -33,8 +33,7 @@ def load_countries() -> list[CountryMeta]:
         population).
 
     Raises:
-        FileNotFoundError: If ``countries.json`` is missing; the message
-            explains how to regenerate it.
+        FileNotFoundError: If the bundled ``countries.json`` is missing.
     """
     if not COUNTRIES_FILE.exists():
         raise FileNotFoundError(
@@ -209,21 +208,18 @@ class SimulationEngine:
         self.day = 0
         self.running = False
         self.speed = 5.0  # simulation steps per second when running
-        self.seeds: list[dict] = []  # initial outbreaks, kept for scenario export
 
     # -- control ---------------------------------------------------------
     def reset(self) -> None:
-        """Clear all compartments, the day counter and the seeded outbreaks."""
+        """Clear all compartments and the day counter (everyone susceptible)."""
         self.model.reset()
         self.day = 0
         self.running = False
-        self.seeds = []
 
     def seed(self, iso: str, count: float = 100.0) -> None:
         """Start an outbreak of ``count`` infectious people in country ``iso``.
 
-        Unknown ISO codes are ignored. The outbreak is recorded so it can be
-        reproduced by an exported scenario.
+        Unknown ISO codes are ignored.
 
         Args:
             iso: ISO 3166-1 alpha-3 country code.
@@ -232,11 +228,14 @@ class SimulationEngine:
         idx = self.index.get(iso)
         if idx is not None:
             self.model.seed(idx, count)
-            self.seeds.append({"iso": iso, "count": count})
 
-    # -- scenario import/export -----------------------------------------
+    # -- scenario save/restore (full live state) ------------------------
     def to_scenario(self, name: str = "scenario") -> dict:
-        """Serialise the current setup (params + speed + seeds) to a dict.
+        """Serialise the full live state so it can be restored exactly.
+
+        Captures the day, parameters, speed and the compartment counts of every
+        affected country. Fully-susceptible countries are omitted (they are
+        rebuilt as S = N on restore), keeping the payload small.
 
         Args:
             name: Label stored alongside the scenario.
@@ -244,15 +243,34 @@ class SimulationEngine:
         Returns:
             A JSON-serialisable dict suitable for :meth:`apply_scenario`.
         """
+        m = self.model
+        countries = [
+            {
+                "iso": c.iso,
+                "s": float(m.S[i]),
+                "e": float(m.E[i]),
+                "i": float(m.I[i]),
+                "r": float(m.R[i]),
+                "d": float(m.D[i]),
+                "v": float(m.V[i]),
+            }
+            for i, c in enumerate(self.countries)
+            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 0.5
+        ]
         return {
             "name": name,
+            "day": self.day,
             "params": self.params.model_dump(),
             "speed": self.speed,
-            "seeds": self.seeds,
+            "countries": countries,
         }
 
     def apply_scenario(self, data: dict) -> None:
-        """Reset, then restore parameters, speed and seeded outbreaks.
+        """Restore a state produced by :meth:`to_scenario`.
+
+        Resets the world (everyone susceptible), restores day/params/speed, then
+        overwrites the compartments of the listed countries. Unknown ISO codes
+        are ignored; the simulation is left paused.
 
         Args:
             data: A scenario dict as produced by :meth:`to_scenario`. Missing
@@ -261,8 +279,18 @@ class SimulationEngine:
         self.reset()
         self.params = Params(**data.get("params", {}))
         self.set_speed(float(data.get("speed", 5.0)))
-        for s in data.get("seeds", []):
-            self.seed(s.get("iso", ""), float(s.get("count", 100)))
+        self.day = int(data.get("day", 0))
+        m = self.model
+        for rec in data.get("countries", []):
+            idx = self.index.get(rec.get("iso", ""))
+            if idx is None:
+                continue
+            m.S[idx] = float(rec.get("s", m.N[idx]))
+            m.E[idx] = float(rec.get("e", 0.0))
+            m.I[idx] = float(rec.get("i", 0.0))
+            m.R[idx] = float(rec.get("r", 0.0))
+            m.D[idx] = float(rec.get("d", 0.0))
+            m.V[idx] = float(rec.get("v", 0.0))
 
     def set_params(self, params: Params) -> None:
         """Replace the active parameters (applied on the next step)."""

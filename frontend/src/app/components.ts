@@ -464,9 +464,11 @@ export class ControlPanel implements OnInit {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'scenario.json';
+    a.download = `${data.name || 'scenario'}.json`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   /** Read a selected JSON file and import it as a scenario. */
@@ -474,10 +476,14 @@ export class ControlPanel implements OnInit {
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    const text = await file.text();
-    const data = JSON.parse(text) as Scenario;
-    await this.sim.importScenario(data);
-    input.value = '';
+    try {
+      const data = JSON.parse(await file.text()) as Scenario;
+      await this.sim.importScenario(data);
+    } catch {
+      alert('File scenario non valido.');
+    } finally {
+      input.value = '';
+    }
   }
 
   /**

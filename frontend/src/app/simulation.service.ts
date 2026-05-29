@@ -173,7 +173,7 @@ export class SimulationService {
   }
 
   /**
-   * Export the current setup as a scenario object.
+   * Export the current full state (day, params, speed, per-country compartments).
    *
    * @param name Label to store in the scenario.
    */
@@ -184,14 +184,15 @@ export class SimulationService {
   }
 
   /**
-   * Import a scenario: the backend resets and replays it, then broadcasts the
-   * new state. Local history is cleared and the slider model is synced.
+   * Import a scenario: the backend restores the state and broadcasts it. The
+   * local history and slider model are synced first so the incoming snapshot
+   * lands cleanly.
    *
    * @param data Scenario to load.
    */
   async importScenario(data: Scenario): Promise<void> {
-    await firstValueFrom(this.http.post(`${API_BASE}/api/scenario`, data));
     this.history.set([]);
     if (data.params) this.params.set({ ...data.params });
+    await firstValueFrom(this.http.post(`${API_BASE}/api/scenario`, data));
   }
 }
