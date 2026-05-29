@@ -67,6 +67,9 @@ class CountrySnapshot(BaseModel):
     r: float = Field(description="Recovered (immune) count")
     d: float = Field(description="Deceased count")
     v: float = Field(description="Vaccinated (immune) count")
+    intervention: float = Field(
+        0.0, description="Per-country intervention level in [0, 1]"
+    )
 
 
 class Totals(BaseModel):

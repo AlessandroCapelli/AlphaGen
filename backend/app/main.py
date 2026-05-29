@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse
 DATA_DIR = Path(__file__).resolve().parent / "data"
 GEOJSON_FILE = DATA_DIR / "world.geo.json"
 PRESETS_FILE = DATA_DIR / "presets.json"
+FLIGHTS_FILE = DATA_DIR / "flights.json"
 
 
 # ============================================================
@@ -122,6 +123,8 @@ async def _handle_command(
         engine.set_params(Params(**msg.get("params", {})))
     elif cmd == "setSpeed":
         engine.set_speed(float(msg.get("speed", 5)))
+    elif cmd == "setCountryIntervention":
+        engine.set_country_intervention(msg.get("iso", ""), float(msg.get("value", 0)))
     else:
         return
 
@@ -205,6 +208,12 @@ def get_presets() -> list[Preset]:
     return [Preset(**p) for p in raw]
 
 
+@app.get("/api/flights", tags=["meta"])
+def get_flights() -> JSONResponse:
+    """Return the flight network (country-pair routes) used by the map arcs."""
+    return JSONResponse(json.loads(FLIGHTS_FILE.read_text(encoding="utf-8")))
+
+
 @app.get("/api/scenario", tags=["scenarios"])
 async def export_scenario(name: str = Query("scenario")) -> dict:
     """Return the current full state as a JSON scenario.
@@ -218,10 +227,15 @@ async def export_scenario(name: str = Query("scenario")) -> dict:
 
 @app.post("/api/scenario", tags=["scenarios"])
 async def import_scenario(data: dict) -> dict:
-    """Load a scenario and broadcast the resulting state to all clients."""
+    """Restore the engine state from a scenario (single live frame).
+
+    Deliberately does not broadcast: the client restores its own view (chart
+    history, timeline buffer, displayed frame) locally, and a later play/step
+    continues from the restored state. Declared ``async`` so the array writes
+    in ``apply_scenario`` run on the event loop, atomically w.r.t. the sim loop.
+    """
     eng = get_engine()
     eng.apply_scenario(data)
-    await get_manager().broadcast_snapshot(eng)
     return {"ok": True, "day": eng.day}
 
 

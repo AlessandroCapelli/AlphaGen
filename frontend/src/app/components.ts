@@ -13,7 +13,7 @@ import {
 import * as echarts from 'echarts';
 import * as L from 'leaflet';
 
-import { Params, Preset, Scenario } from './models';
+import { CountrySnapshot, Params, Preset, SavedState } from './models';
 import { SimulationService } from './simulation.service';
 
 /* ============================================================
@@ -21,56 +21,137 @@ import { SimulationService } from './simulation.service';
    ============================================================ */
 
 /**
- * Map an active-case fraction to a heat colour (amber -> crimson).
- *
- * @param ratio Active cases (E + I) divided by population, in [0, 1].
- * @returns A hex colour string.
+ * "Inferno"-style heat ramp (deep purple → magenta → orange → bright amber):
+ * a perceptually pleasant gradient that glows against the dark base map.
  */
-function heatColor(ratio: number): string {
-  if (ratio <= 0) return '#1b2733';
-  if (ratio < 1e-5) return '#fde68a';
-  if (ratio < 1e-4) return '#fbbf24';
-  if (ratio < 1e-3) return '#fb923c';
-  if (ratio < 1e-2) return '#f43f5e';
-  return '#b91c1c';
+const HEAT_STOPS: readonly [number, readonly [number, number, number]][] = [
+  [0.0, [40, 11, 84]],
+  [0.25, [121, 28, 110]],
+  [0.5, [190, 55, 82]],
+  [0.75, [243, 113, 32]],
+  [1.0, [250, 193, 39]],
+];
+
+/** Map an active-case fraction to [0,1] on a log scale (1e-7 .. ~1e-1). */
+function heatT(ratio: number): number {
+  return Math.max(0, Math.min(1, (Math.log10(ratio) + 7) / 6));
 }
 
 /**
- * Fill opacity grows with the active-case fraction so hot zones stand out
+ * Map an active-case fraction to a smooth heat colour by interpolating the
+ * inferno ramp on a log scale.
+ *
+ * @param ratio Active cases (E + I) divided by population, in [0, 1].
+ * @returns An `rgb(...)` colour string.
+ */
+function heatColor(ratio: number): string {
+  if (ratio <= 0) return '#1b2733';
+  const t = heatT(ratio);
+  for (let k = 1; k < HEAT_STOPS.length; k++) {
+    const [t1, c1] = HEAT_STOPS[k];
+    if (t <= t1) {
+      const [t0, c0] = HEAT_STOPS[k - 1];
+      const f = (t - t0) / (t1 - t0 || 1);
+      const r = Math.round(c0[0] + (c1[0] - c0[0]) * f);
+      const g = Math.round(c0[1] + (c1[1] - c0[1]) * f);
+      const b = Math.round(c0[2] + (c1[2] - c0[2]) * f);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+  }
+  const [, last] = HEAT_STOPS[HEAT_STOPS.length - 1];
+  return `rgb(${last[0]}, ${last[1]}, ${last[2]})`;
+}
+
+/**
+ * Fill opacity grows smoothly with the active-case fraction so hot zones glow
  * against the dark base map.
  *
  * @param ratio Active cases (E + I) divided by population, in [0, 1].
  */
 function heatOpacity(ratio: number): number {
-  if (ratio <= 0) return 0.06;
-  if (ratio < 1e-5) return 0.35;
-  if (ratio < 1e-4) return 0.55;
-  if (ratio < 1e-3) return 0.72;
-  if (ratio < 1e-2) return 0.85;
-  return 0.95;
+  if (ratio <= 0) return 0.05;
+  return 0.25 + 0.7 * heatT(ratio);
+}
+
+/** One row of the country detail card. */
+interface DetailRow {
+  label: string;
+  value: number;
+  color: string;
+}
+
+/** Data shown in the country detail card, derived from the latest snapshot. */
+interface CountryDetail {
+  iso: string;
+  name: string;
+  population: number;
+  infectedPct: string;
+  intervention: number;
+  /** SVG path of the country's active-case sparkline (empty if too short). */
+  spark: string;
+  rows: DetailRow[];
 }
 
 /**
  * World map view.
  *
- * Renders a Leaflet choropleth of the countries, recolouring each on every
- * snapshot by its active-case fraction, and lets the user click a country to
- * seed an outbreak there.
+ * Renders a dark base map with a heat choropleth (infection intensity) and
+ * animated flight arcs when contagion crosses a border. Clicking a country
+ * opens a detail card with its live SEIRD+V breakdown, a lockdown control and a
+ * button to seed an outbreak there.
  */
 @Component({
   selector: 'app-world-map',
   template: `
     <div class="map-wrap">
       <div #mapEl class="map"></div>
+
       <div class="legend">
-        <span class="title">Casi attivi</span>
-        <span><i style="background:#1b2733"></i>0</span>
-        <span><i style="background:#fde68a"></i>&lt;0.001%</span>
-        <span><i style="background:#fbbf24"></i>&lt;0.01%</span>
-        <span><i style="background:#fb923c"></i>&lt;0.1%</span>
-        <span><i style="background:#f43f5e"></i>&lt;1%</span>
-        <span><i style="background:#b91c1c"></i>≥1%</span>
+        <span class="title">Intensità contagio</span>
+        <div class="legend-bar"></div>
+        <div class="legend-scale"><span>basso</span><span>alto</span></div>
+        <div class="legend-lock"><span class="lk"></span> lockdown</div>
       </div>
+
+      @if (detail(); as d) {
+        <div class="country-card">
+          <button class="cc-close" (click)="select(null)" aria-label="Chiudi">×</button>
+          <h4>{{ d.name }}</h4>
+          <div class="cc-sub">{{ d.infectedPct }} infetti · pop. {{ fmt(d.population) }}</div>
+          @if (d.spark) {
+            <svg class="cc-spark" viewBox="0 0 100 30" preserveAspectRatio="none">
+              <path [attr.d]="d.spark" />
+            </svg>
+          }
+          <div class="cc-rows">
+            @for (r of d.rows; track r.label) {
+              <div class="cc-row">
+                <span class="cc-dot" [style.background]="r.color"></span>
+                <span class="cc-label">{{ r.label }}</span>
+                <span class="cc-val">{{ fmt(r.value) }}</span>
+              </div>
+            }
+          </div>
+          <div class="cc-lock">
+            <label class="row">
+              <span>🔒 Lockdown</span>
+              <span class="val">{{ lockPct(d.intervention) }}</span>
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              [value]="d.intervention"
+              [disabled]="viewing()"
+              (input)="onLock(d.iso, $event)"
+            />
+          </div>
+          <button class="btn primary cc-seed" [disabled]="viewing()" (click)="seedHere(d.iso)">
+            🦠 Semina focolaio qui
+          </button>
+        </div>
+      }
     </div>
   `,
 })
@@ -80,35 +161,106 @@ export class WorldMap implements AfterViewInit, OnDestroy {
 
   /** The Leaflet map instance (created in {@link ngAfterViewInit}). */
   private map?: L.Map;
-  /** The GeoJSON layer holding one path per country. */
+  /** The GeoJSON layer holding one path per country (faint choropleth). */
   private geoLayer?: L.GeoJSON;
+  /** Country centroids (ISO3 -> [lat, lon]) used to place the flight arcs. */
+  private readonly centroids = new Map<string, L.LatLngTuple>();
+  /** Flight adjacency (ISO3 -> connected countries with weight). */
+  private readonly neighbors = new Map<string, { iso: string; w: number }[]>();
+  /** Countries infected in the previous snapshot (to detect new arrivals). */
+  private prevInfected = new Set<string>();
+  /** SVG renderer dedicated to the animated flight arcs. */
+  private arcRenderer?: L.SVG;
+  /** Arcs currently animating (capped to avoid clutter). */
+  private activeArcs = 0;
+  /** ISO3 of the hovered country, whose border the snapshot effect leaves alone. */
+  private hoveredIso: string | null = null;
+
+  /** ISO3 of the country whose detail card is open, or null. */
+  protected readonly selectedIso = signal<string | null>(null);
+  /** Whether the timeline is being scrubbed (live actions are disabled then). */
+  protected readonly viewing = this.sim.viewing;
+
+  /** Detail card data for the selected country, recomputed on every snapshot. */
+  protected readonly detail = computed<CountryDetail | null>(() => {
+    const iso = this.selectedIso();
+    const snap = this.sim.displayed();
+    if (!iso || !snap) return null;
+    const c = snap.countries.find((x) => x.iso === iso);
+    if (!c) return null;
+    const pct = c.population > 0 ? ((c.e + c.i) / c.population) * 100 : 0;
+    return {
+      iso: c.iso,
+      name: c.name,
+      population: c.population,
+      infectedPct: pct >= 1 ? `${pct.toFixed(1)}%` : `${pct.toFixed(3)}%`,
+      intervention: c.intervention,
+      spark: this.sparkPath(this.sim.seriesFor(c.iso)),
+      rows: [
+        { label: 'Suscettibili', value: c.s, color: 'var(--c-s)' },
+        { label: 'Esposti', value: c.e, color: 'var(--c-e)' },
+        { label: 'Infetti', value: c.i, color: 'var(--c-i)' },
+        { label: 'Guariti', value: c.r, color: 'var(--c-r)' },
+        { label: 'Deceduti', value: c.d, color: 'var(--c-d)' },
+        { label: 'Vaccinati', value: c.v, color: 'var(--c-v)' },
+      ],
+    };
+  });
 
   constructor() {
-    // Recolour and refresh tooltips whenever a new snapshot arrives.
+    // Recolour the choropleth from the displayed frame (live or scrubbed) and,
+    // when following live, animate flight arcs for newly-infected countries.
     effect(() => {
-      const snap = this.sim.snapshot();
-      if (!snap || !this.geoLayer) return;
+      const snap = this.sim.displayed();
+      if (!snap) return;
       const byIso = new Map(snap.countries.map((c) => [c.iso, c]));
-      this.geoLayer.eachLayer((layer) => {
+
+      this.geoLayer?.eachLayer((layer) => {
         const feat = (layer as L.GeoJSON & { feature?: GeoJSON.Feature }).feature;
         const id = typeof feat?.id === 'string' ? feat.id : '';
         const c = byIso.get(id);
         const ratio = c && c.population > 0 ? (c.e + c.i) / c.population : 0;
-        (layer as L.Path).setStyle({
+        const style: L.PathOptions = {
           fillColor: heatColor(ratio),
           fillOpacity: heatOpacity(ratio),
-        });
-
+        };
+        if (id !== this.hoveredIso) {
+          const locked = (c?.intervention ?? 0) > 0;
+          style.color = locked ? '#7dd3fc' : 'rgba(255, 255, 255, 0.12)';
+          style.weight = locked ? 1.6 : 0.4;
+        }
+        (layer as L.Path).setStyle(style);
         const name = (feat?.properties as { name?: string })?.name ?? '';
         const infected = c ? Math.round(c.e + c.i) : 0;
         layer.setTooltipContent(
-          `<b>${name}</b><br>Infetti: ${infected.toLocaleString('it-IT')}<br><i>click = focolaio</i>`,
+          `<b>${name}</b><br>Infetti: ${infected.toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
         );
       });
+
+      // Animated flight arcs only when following live (not while scrubbing):
+      // draw a curve from a likely infected source to each newly-infected country.
+      if (this.sim.viewing()) return;
+      const current = new Set<string>();
+      for (const c of snap.countries) if (c.e + c.i >= 1) current.add(c.iso);
+      // A day-0 frame means reset/import: re-baseline without drawing arcs.
+      if (snap.day === 0) {
+        this.prevInfected = current;
+        return;
+      }
+      const arrivals = [...current].filter((iso) => !this.prevInfected.has(iso));
+      // Skip bursts (initial load / scenario import) to avoid an arc storm.
+      if (this.prevInfected.size > 0 && arrivals.length <= 20) {
+        for (const dst of arrivals.slice(0, 6)) {
+          if (this.activeArcs >= 24) break;
+          const src = this.bestSource(dst, byIso);
+          if (src) this.drawArc(src, dst);
+        }
+      }
+      this.prevInfected = current;
     });
   }
 
-  /** Create the map and load the world GeoJSON once the view exists. */
+  /** Create the map and the arc renderer, then load the backend data. */
   async ngAfterViewInit(): Promise<void> {
     const map = L.map(this.mapEl().nativeElement, {
       center: [25, 10],
@@ -128,21 +280,55 @@ export class WorldMap implements AfterViewInit, OnDestroy {
       maxZoom: 8,
     }).addTo(map);
 
-    const geojson = (await this.sim.getGeoJson()) as GeoJSON.GeoJsonObject;
-    this.geoLayer = L.geoJSON(geojson, {
-      style: () => ({
-        weight: 0.5,
-        color: 'rgba(150, 170, 205, 0.35)',
-        fillColor: '#1b2733',
-        fillOpacity: 0.06,
-      }),
-      onEachFeature: (feature, layer) => this.bindFeature(feature, layer),
-    }).addTo(map);
+    // Dedicated SVG renderer so the flight arcs can be animated via CSS.
+    this.arcRenderer = L.svg();
+    this.arcRenderer.addTo(map);
+
+    void this.loadData(map);
   }
 
   /**
-   * Wire up hover highlighting, the click-to-seed handler and the tooltip for
-   * one country feature.
+   * Load the choropleth, centroids and flight adjacency from the backend.
+   * Each step is idempotent and the whole thing retries if the backend is not
+   * ready yet (e.g. the frontend started before the API).
+   */
+  private async loadData(map: L.Map): Promise<void> {
+    try {
+      if (!this.geoLayer) {
+        const geojson = (await this.sim.getGeoJson()) as GeoJSON.GeoJsonObject;
+        this.geoLayer = L.geoJSON(geojson, {
+          style: () => ({
+            weight: 0.4,
+            color: 'rgba(255, 255, 255, 0.12)',
+            fillColor: '#1b2733',
+            fillOpacity: 0.05,
+          }),
+          onEachFeature: (feature, layer) => this.bindFeature(feature, layer),
+        }).addTo(map);
+      }
+      if (this.centroids.size === 0) {
+        for (const c of await this.sim.getCountries()) {
+          this.centroids.set(c.iso, [c.lat, c.lon]);
+        }
+      }
+      if (this.neighbors.size === 0) {
+        const flights = (await this.sim.getFlights()) as {
+          routes?: { a: string; b: string; w: number }[];
+        };
+        for (const r of flights.routes ?? []) {
+          this.addNeighbor(r.a, r.b, r.w);
+          this.addNeighbor(r.b, r.a, r.w);
+        }
+      }
+    } catch {
+      // Backend not ready — retry shortly (already-loaded steps are skipped).
+      setTimeout(() => this.loadData(map), 1500);
+    }
+  }
+
+  /**
+   * Wire up hover highlighting, the click-to-open-detail handler and the
+   * tooltip for one country feature.
    *
    * @param feature The GeoJSON feature (its `id` is the ISO3 code).
    * @param layer The Leaflet layer rendering the feature.
@@ -153,25 +339,139 @@ export class WorldMap implements AfterViewInit, OnDestroy {
 
     layer.on({
       mouseover: (e) => {
+        this.hoveredIso = iso;
         const t = e.target as L.Path;
-        t.setStyle({ weight: 1.6, color: '#eef2f9' });
+        t.setStyle({ weight: 1.8, color: '#ffffff' });
         t.bringToFront();
       },
       mouseout: (e) => {
-        (e.target as L.Path).setStyle({ weight: 0.5, color: 'rgba(150, 170, 205, 0.35)' });
+        this.hoveredIso = null;
+        const c = this.sim.displayed()?.countries.find((x) => x.iso === iso);
+        const locked = (c?.intervention ?? 0) > 0;
+        (e.target as L.Path).setStyle(
+          locked
+            ? { weight: 1.6, color: '#7dd3fc' }
+            : { weight: 0.4, color: 'rgba(255, 255, 255, 0.12)' },
+        );
       },
       click: () => {
-        if (iso) this.sim.seed(iso, this.sim.seedCount());
+        if (iso) this.select(iso);
       },
     });
 
-    const snap = this.sim.snapshot();
-    const country = snap?.countries.find((c) => c.iso === iso);
-    const infected = country ? Math.round(country.e + country.i) : 0;
-    layer.bindTooltip(
-      `<b>${name}</b><br>Infetti: ${infected.toLocaleString('it-IT')}<br><i>click = focolaio</i>`,
-      { sticky: true },
-    );
+    layer.bindTooltip(`<b>${name}</b><br><i>click = dettagli</i>`, { sticky: true });
+  }
+
+  /** Open (or close, with null) the detail card for a country. */
+  protected select(iso: string | null): void {
+    this.selectedIso.set(iso);
+  }
+
+  /** Seed an outbreak in the given country using the current seed size. */
+  protected seedHere(iso: string): void {
+    this.sim.seed(iso, this.sim.seedCount());
+  }
+
+  /** Format a count with thousands separators. */
+  protected fmt(v: number): string {
+    return Math.round(v).toLocaleString('it-IT');
+  }
+
+  /** Build an SVG path (in a 100×30 box) from a value series; '' if too short. */
+  private sparkPath(values: number[]): string {
+    if (values.length < 2) return '';
+    const max = Math.max(...values, 1);
+    const n = values.length;
+    let d = '';
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 100;
+      const y = 28 - (values[i] / max) * 26;
+      d += `${i === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)} `;
+    }
+    return d.trim();
+  }
+
+  /** Set the lockdown level for the selected country from the slider. */
+  protected onLock(iso: string, event: Event): void {
+    this.sim.setCountryIntervention(iso, parseFloat((event.target as HTMLInputElement).value));
+  }
+
+  /** Format an intervention level (0..1) as a percentage. */
+  protected lockPct(v: number): string {
+    return `${Math.round(v * 100)}%`;
+  }
+
+  /** Register a directed flight-adjacency entry. */
+  private addNeighbor(from: string, to: string, w: number): void {
+    const list = this.neighbors.get(from);
+    if (list) list.push({ iso: to, w });
+    else this.neighbors.set(from, [{ iso: to, w }]);
+  }
+
+  /**
+   * Pick the most plausible source of a new outbreak: the previously-infected
+   * neighbour with the strongest *open* flight link. A source's score is its
+   * route weight times its open fraction `(1 - intervention)`, so a fully
+   * locked-down country (which exports nothing in the model) is never shown as
+   * the origin of an arc.
+   */
+  private bestSource(dst: string, byIso: Map<string, CountrySnapshot>): string | null {
+    let best: string | null = null;
+    let bestScore = 0;
+    for (const n of this.neighbors.get(dst) ?? []) {
+      if (!this.prevInfected.has(n.iso)) continue;
+      const open = 1 - (byIso.get(n.iso)?.intervention ?? 0);
+      const score = n.w * open;
+      if (score > bestScore) {
+        bestScore = score;
+        best = n.iso;
+      }
+    }
+    return best;
+  }
+
+  /** Draw a short-lived animated arc from one country centroid to another. */
+  private drawArc(srcIso: string, dstIso: string): void {
+    const a = this.centroids.get(srcIso);
+    const b = this.centroids.get(dstIso);
+    if (!a || !b || !this.map || !this.arcRenderer) return;
+    const line = L.polyline(this.bezierArc(a, b), {
+      renderer: this.arcRenderer,
+      className: 'flight-arc',
+      color: '#ff5d73',
+      weight: 2,
+      interactive: false,
+    }).addTo(this.map);
+    // Normalise the path length so the CSS draw-on animation is length-agnostic.
+    (line as unknown as { _path?: SVGPathElement })._path?.setAttribute('pathLength', '1');
+    this.activeArcs++;
+    setTimeout(() => {
+      this.map?.removeLayer(line);
+      this.activeArcs--;
+    }, 1700);
+  }
+
+  /** Build a curved (quadratic-bezier) poly-line between two lat/lon points. */
+  private bezierArc(a: L.LatLngTuple, b: L.LatLngTuple, segments = 24): L.LatLngTuple[] {
+    const [lat1, lon1] = a;
+    const [lat2, lon2] = b;
+    const dx = lon2 - lon1;
+    const dy = lat2 - lat1;
+    const dist = Math.hypot(dx, dy) || 1;
+    const lift = Math.min(dist * 0.2, 25);
+    // Control point: the chord midpoint lifted perpendicular to the chord.
+    const cx = (lon1 + lon2) / 2 + (-dy / dist) * lift;
+    const cy = (lat1 + lat2) / 2 + (dx / dist) * lift;
+    const pts: L.LatLngTuple[] = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const u = 1 - t;
+      pts.push([
+        u * u * lat1 + 2 * u * t * cy + t * t * lat2,
+        u * u * lon1 + 2 * u * t * cx + t * t * lon2,
+      ]);
+    }
+    return pts;
   }
 
   /** Tear down the Leaflet map to release DOM and event listeners. */
@@ -220,18 +520,33 @@ export class EpiChart implements AfterViewInit, OnDestroy {
   private readonly onResize = () => this.chart?.resize();
 
   constructor() {
-    // Push new data into the chart whenever the history grows or resets.
+    // Push new data into the chart whenever the history grows or resets, and
+    // draw a cursor line at the scrubbed day while the timeline is being viewed.
     effect(() => {
       const history = this.sim.history();
       if (!this.chart) return;
       const days = history.map((p) => p.day);
+      const cursor = this.sim.viewing() ? this.sim.day() : null;
       this.chart.setOption({
         xAxis: { data: days },
-        series: SERIES.map((s) => ({
+        series: SERIES.map((s, idx) => ({
           data: history.map((p) => Math.round(p.totals[s.key])),
+          markLine: idx === 0 ? this.cursorMarkLine(cursor) : undefined,
         })),
       });
     });
+  }
+
+  /** ECharts markLine config for the timeline cursor (empty when following live). */
+  private cursorMarkLine(day: number | null): echarts.MarkLineComponentOption {
+    if (day === null) return { data: [] };
+    return {
+      silent: true,
+      symbol: 'none',
+      label: { show: false },
+      lineStyle: { color: '#eef2f9', width: 1, opacity: 0.55 },
+      data: [{ xAxis: day }],
+    };
   }
 
   /** Build the chart skeleton (axes, legend, styling) once the view exists. */
@@ -346,10 +661,10 @@ const CONTROLS: Ctrl[] = [
   { key: 'r0', label: 'R₀ — trasmissibilità', min: 0, max: 15, step: 0.1 },
   { key: 'intervention', label: 'Interventi (riduzione contatti)', min: 0, max: 1, step: 0.01, pct: true },
   { key: 'vaccination_rate', label: 'Vaccinazione / giorno', min: 0, max: 0.05, step: 0.001, pct: true },
-  { key: 'fatality_rate', label: 'Letalità', min: 0, max: 0.2, step: 0.001, pct: true },
+  { key: 'fatality_rate', label: 'Letalità', min: 0, max: 0.6, step: 0.005, pct: true },
   { key: 'incubation_days', label: 'Incubazione (giorni)', min: 1, max: 21, step: 0.5 },
   { key: 'infectious_days', label: 'Durata infettiva (giorni)', min: 1, max: 30, step: 0.5 },
-  { key: 'mobility', label: 'Mobilità globale', min: 0, max: 3, step: 0.1 },
+  { key: 'mobility', label: 'Mobilità globale', min: 0, max: 5, step: 0.1 },
 ];
 
 /**
@@ -370,6 +685,28 @@ const CONTROLS: Ctrl[] = [
         <button class="btn" (click)="sim.stepOnce()" [disabled]="sim.running()">⏭ Step</button>
         <button class="btn danger" (click)="sim.reset()">⟲ Reset</button>
         <div class="day">Giorno <b>{{ sim.day() }}</b></div>
+      </section>
+
+      <section class="block timeline">
+        <label class="row">
+          <span>Timeline</span>
+          <span class="val" [class.live]="!sim.viewing()">
+            {{ sim.viewing() ? 'giorno ' + sim.day() : '● LIVE' }}
+          </span>
+        </label>
+        <div class="tl">
+          <input
+            type="range"
+            min="0"
+            [max]="maxFrame()"
+            [disabled]="maxFrame() < 1"
+            [value]="sim.viewIndex() ?? maxFrame()"
+            (input)="onScrub($event)"
+          />
+          @if (sim.viewing()) {
+            <button class="btn" (click)="sim.goLive()">● Live</button>
+          }
+        </div>
       </section>
 
       <section class="block">
@@ -398,7 +735,7 @@ const CONTROLS: Ctrl[] = [
           </select>
         </label>
         <label class="field">
-          <span>Infetti iniziali (per click sulla mappa)</span>
+          <span>Infetti iniziali del focolaio</span>
           <input type="number" min="1" [value]="sim.seedCount()" (input)="onSeedCount($event)" />
         </label>
       </section>
@@ -453,6 +790,8 @@ export class ControlPanel implements OnInit {
   protected readonly presets = signal<Preset[]>([]);
   /** Convenience accessor for the latest worldwide totals. */
   protected readonly totals = computed(() => this.sim.totals());
+  /** Highest scrubbable frame index (0 when there is nothing to scrub yet). */
+  protected readonly maxFrame = computed(() => Math.max(0, this.sim.frameCount() - 1));
 
   /** Load the presets; fall back to an empty list on failure. */
   async ngOnInit(): Promise<void> {
@@ -489,10 +828,15 @@ export class ControlPanel implements OnInit {
     this.sim.setSpeed(parseFloat((event.target as HTMLInputElement).value));
   }
 
+  /** Scrub the timeline to a buffered frame (or back to live at the end). */
+  protected onScrub(event: Event): void {
+    this.sim.setViewIndex(parseInt((event.target as HTMLInputElement).value, 10));
+  }
+
   /** Handle the outbreak-size input change. */
   protected onSeedCount(event: Event): void {
     const v = parseInt((event.target as HTMLInputElement).value, 10);
-    this.sim.seedCount.set(Number.isFinite(v) ? v : 0);
+    this.sim.seedCount.set(Number.isFinite(v) && v > 0 ? v : 1);
   }
 
   /** Apply the parameters of the selected preset. */
@@ -508,30 +852,31 @@ export class ControlPanel implements OnInit {
     else this.sim.play();
   }
 
-  /** Export the current scenario and trigger a JSON file download. */
-  protected async onExport(): Promise<void> {
-    const data = await this.sim.exportScenario('scenario');
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  /** Export the complete state (timeline buffer) and trigger a JSON download. */
+  protected onExport(): void {
+    const blob = new Blob([JSON.stringify(this.sim.exportState())], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${data.name || 'scenario'}.json`;
+    a.download = 'alphagen-state.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
-  /** Read a selected JSON file and import it as a scenario. */
+  /** Read a selected JSON file and restore the complete state from it. */
   protected async onImport(event: Event): Promise<void> {
     const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
     try {
-      const data = JSON.parse(await file.text()) as Scenario;
-      await this.sim.importScenario(data);
+      const data = JSON.parse(await file.text()) as SavedState;
+      await this.sim.importState(data);
     } catch {
-      alert('File scenario non valido.');
+      alert('File di stato non valido.');
     } finally {
       input.value = '';
     }

@@ -14,17 +14,23 @@ subito l'effetto su una **mappa mondiale** e su **grafici a curve**.
 
 - **Modello epidemiologico SEIRD+V** (Suscettibili, Esposti, Infetti, Guariti,
   Deceduti, Vaccinati) per 245 nazioni, con dati di popolazione reali.
-- **Diffusione tra nazioni** tramite una rete voli semplificata (hub principali)
+- **Diffusione tra nazioni** tramite una rete voli reale (dataset OpenFlights)
   più una connettività di base che garantisce la raggiungibilità globale.
 - **Controllo in tempo reale**: avvio/pausa, avanzamento manuale, velocità
   regolabile e modifica live di tutti i parametri tramite WebSocket.
-- **Mappa mondiale** (Leaflet, choropleth): colore per livello di casi attivi,
-  click su un paese per innescare il focolaio.
-- **Grafici a curve** (ECharts): andamento temporale di Esposti, Infetti,
-  Guariti, Deceduti e Vaccinati.
-- **Preset di malattie** pronti all'uso (COVID-19, influenza, morbillo, patogeno
-  severo) come punto di partenza, completamente modificabili.
-- **Scenari import/export** come file JSON (nessun database).
+- **Mappa mondiale** (Leaflet, tile scure): choropleth a intensità + **archi di
+  volo animati** quando il contagio supera un confine.
+- **Scheda paese**: click su una nazione → dettaglio SEIRD+V live, **sparkline**
+  dei casi attivi, **lockdown per-paese** e pulsante "semina qui".
+- **Grafici a curve** (ECharts) con aree sfumate per Esposti, Infetti, Guariti,
+  Deceduti, Vaccinati.
+- **Timeline / scrubber**: riavvolgi e rivedi l'evoluzione giorno per giorno
+  (la mappa, le curve e la scheda mostrano il giorno selezionato).
+- **Preset di malattie** reali pronti all'uso (18, da COVID-19 a Ebola),
+  completamente modificabili.
+- **Salva/Carica come file JSON** — esporta lo **stato completo** (l'intero
+  buffer della timeline: curve del grafico, replay sulla mappa, parametri,
+  compartimenti e lockdown per paese) e lo ripristina esattamente. Nessun DB.
 
 ## Architettura
 
@@ -82,8 +88,9 @@ npm start
 ```
 
 Apri **http://localhost:4200**, scegli un preset, **clicca un paese** sulla mappa
-per innescare il focolaio, premi **▶ Avvia** e regola gli slider mentre la
-simulazione procede.
+per aprire la sua scheda e premi **🦠 Semina focolaio qui**, poi **▶ Avvia** e
+regola gli slider mentre la simulazione procede. Dalla scheda puoi anche imporre
+un **lockdown** al singolo paese; con la **timeline** riavvolgi e rivedi l'epidemia.
 
 ## Il modello di simulazione
 
@@ -91,11 +98,13 @@ Per ogni nazione _i_ si evolvono i compartimenti S, E, I, R, D, V con un
 aggiornamento giornaliero (Eulero esplicito, `dt = 1 giorno`):
 
 ```
-β_eff   = (R₀ / durata_infettiva) · (1 − interventi)
+β_eff   = (R₀ / durata_infettiva) · (1 − interventi)   # interventi = riduzione globale
+apert_i = 1 − lockdown_i                                # lockdown per-paese in [0,1]
 σ       = 1 / incubazione
 γ       = 1 / durata_infettiva
 
-λ_i     = β_eff · I_i / N_i  +  mobilità · Σ_j W[i,j] · I_j / N_j
+prev_i  = apert_i · I_i / N_i                           # un paese chiuso trasmette/esporta meno
+λ_i     = β_eff · prev_i  +  mobilità · apert_i · Σ_j W[i,j] · prev_j
 nuovi_E = λ_i · S_i
 nuovi_I = σ · E_i
 uscita  = γ · I_i
@@ -104,8 +113,11 @@ nuovi_R = (1 − letalità) · uscita
 nuovi_V = vaccinazione · S_i
 ```
 
-dove `W[i,j]` è il peso di viaggio (rete voli) dalla nazione _j_ alla _i_. Il
-termine con `W` rappresenta la pressione infettiva importata dall'estero.
+dove `W[i,j]` è il peso di viaggio (rete voli) dalla nazione _j_ alla _i_ (il
+termine con `W` è la pressione infettiva importata dall'estero) e `lockdown_i`
+è l'intervento **per singolo paese**, che riduce sia la trasmissione locale sia
+import ed export di quel paese. Ogni transizione è limitata alla popolazione
+disponibile nel compartimento di partenza (il modello conserva la popolazione).
 
 ## Parametri interattivi
 
@@ -127,14 +139,15 @@ Base URL: `http://localhost:8000`
 
 ### REST
 
-| Metodo | Path                  | Descrizione                                     |
-| ------ | --------------------- | ----------------------------------------------- |
-| `GET`  | `/api/health`         | Healthcheck                                     |
-| `GET`  | `/api/countries`      | Metadati nazioni (ISO, popolazione, coordinate) |
-| `GET`  | `/api/geojson`        | Confini del mondo (GeoJSON) per la mappa        |
-| `GET`  | `/api/presets`        | Preset di malattie                              |
-| `GET`  | `/api/scenario?name=` | Esporta lo scenario corrente (JSON)             |
-| `POST` | `/api/scenario`       | Importa uno scenario                            |
+| Metodo | Path                  | Descrizione                                      |
+| ------ | --------------------- | ------------------------------------------------ |
+| `GET`  | `/api/health`         | Healthcheck                                      |
+| `GET`  | `/api/countries`      | Metadati nazioni (ISO, popolazione, coordinate)  |
+| `GET`  | `/api/geojson`        | Confini del mondo (GeoJSON) per la mappa         |
+| `GET`  | `/api/flights`        | Rete voli (coppie di paesi) per gli archi        |
+| `GET`  | `/api/presets`        | Preset di malattie                               |
+| `GET`  | `/api/scenario?name=` | Stato live di un singolo frame (uso interno)     |
+| `POST` | `/api/scenario`       | Sincronizza il motore a uno stato (no broadcast) |
 
 ### WebSocket `/ws`
 
@@ -148,6 +161,7 @@ Base URL: `http://localhost:8000`
 { "type": "seed", "iso": "USA", "count": 100 }    // innesca un focolaio
 { "type": "setParams", "params": { /* ... */ } }  // tuning in tempo reale
 { "type": "setSpeed", "speed": 10 }               // step al secondo
+{ "type": "setCountryIntervention", "iso": "ITA", "value": 0.6 }  // lockdown paese
 ```
 
 **Server → client** (ad ogni step):
@@ -173,6 +187,7 @@ Base URL: `http://localhost:8000`
 			"r": 0,
 			"d": 0,
 			"v": 0,
+			"intervention": 0,
 		},
 	],
 }

@@ -2,7 +2,15 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
-import { CountryMeta, HistoryPoint, Params, Preset, Scenario, Snapshot } from './models';
+import {
+  CountryMeta,
+  HistoryPoint,
+  Params,
+  Preset,
+  SavedState,
+  Scenario,
+  Snapshot,
+} from './models';
 
 /** Base URL of the backend REST API. */
 const API_BASE = 'http://localhost:8000';
@@ -12,6 +20,9 @@ const WS_URL = 'ws://localhost:8000/ws';
 
 /** Maximum number of history points kept in memory for the chart. */
 const HISTORY_LIMIT = 10_000;
+
+/** Maximum number of full snapshots buffered for the timeline scrubber. */
+const FRAME_LIMIT = 600;
 
 /** Default number of initial infectious individuals when seeding an outbreak. */
 const DEFAULT_SEED_COUNT = 100;
@@ -50,13 +61,31 @@ export class SimulationService {
   readonly params = signal<Params>({ ...DEFAULT_PARAMS });
   /** Number of infectious individuals injected when a country is clicked. */
   readonly seedCount = signal(DEFAULT_SEED_COUNT);
+  /** Ring buffer of full snapshots, used by the timeline scrubber. */
+  private frames: Snapshot[] = [];
+  /** Number of buffered frames (drives the scrubber range). */
+  readonly frameCount = signal(0);
+  /** Bumped on every received frame so derived series stay reactive even when
+   *  the buffer is full and `frameCount` stops changing. */
+  private readonly frameTick = signal(0);
+  /** Frame index being viewed, or null to follow the live latest frame. */
+  readonly viewIndex = signal<number | null>(null);
 
-  /** Current simulated day (0 when no snapshot yet). */
-  readonly day = computed(() => this.snapshot()?.day ?? 0);
-  /** Whether the simulation is auto-advancing. */
+  /** Whether the user is scrubbing a past frame (not following live). */
+  readonly viewing = computed(() => this.viewIndex() !== null);
+  /** The snapshot currently shown: the scrubbed frame, or the live latest. */
+  readonly displayed = computed<Snapshot | null>(() => {
+    const i = this.viewIndex();
+    if (i === null) return this.snapshot();
+    return this.frames[i] ?? this.snapshot();
+  });
+
+  /** Simulated day of the displayed frame. */
+  readonly day = computed(() => this.displayed()?.day ?? 0);
+  /** Whether the simulation is auto-advancing (always the live state). */
   readonly running = computed(() => this.snapshot()?.running ?? false);
-  /** Latest worldwide totals, or null before the first snapshot. */
-  readonly totals = computed(() => this.snapshot()?.totals ?? null);
+  /** Worldwide totals of the displayed frame, or null before the first frame. */
+  readonly totals = computed(() => this.displayed()?.totals ?? null);
 
   /** Open the WebSocket connection. Idempotent: a no-op if already connected. */
   connect(): void {
@@ -67,7 +96,10 @@ export class SimulationService {
     ws.onclose = () => {
       this.connected.set(false);
       this.socket = undefined;
+      // Auto-reconnect (e.g. after a backend reload) until the socket is back.
+      setTimeout(() => this.connect(), 1500);
     };
+    ws.onerror = () => ws.close();
     ws.onmessage = (ev) => this.onMessage(ev);
   }
 
@@ -77,13 +109,23 @@ export class SimulationService {
     if (data.type !== 'snapshot') return;
     this.snapshot.set(data);
     if (data.day === 0) {
-      // Day 0 means a fresh start/reset: restart the time series.
+      // Day 0 means a fresh start/reset: restart the series and the buffer.
       this.history.set([{ day: 0, totals: data.totals }]);
+      this.frames = [data];
+      this.viewIndex.set(null);
     } else {
       const next = [...this.history(), { day: data.day, totals: data.totals }];
       if (next.length > HISTORY_LIMIT) next.shift();
       this.history.set(next);
+      this.frames.push(data);
+      if (this.frames.length > FRAME_LIMIT) {
+        this.frames.shift();
+        const vi = this.viewIndex();
+        if (vi !== null) this.viewIndex.set(Math.max(0, vi - 1));
+      }
     }
+    this.frameCount.set(this.frames.length);
+    this.frameTick.set(this.frameTick() + 1);
   }
 
   /** Send a JSON command over the WebSocket (dropped if not connected). */
@@ -108,10 +150,33 @@ export class SimulationService {
     this.send({ type: 'step' });
   }
 
-  /** Reset to day 0 with an empty world and clear the local history. */
+  /** Reset to day 0 with an empty world and clear the local history/buffer. */
   reset(): void {
     this.history.set([]);
+    this.frames = [];
+    this.frameCount.set(0);
+    this.viewIndex.set(null);
     this.send({ type: 'reset' });
+  }
+
+  /** Scrub to a buffered frame; the last index (or null) returns to live. */
+  setViewIndex(i: number | null): void {
+    if (i === null || i >= this.frames.length - 1) this.viewIndex.set(null);
+    else this.viewIndex.set(Math.max(0, i));
+  }
+
+  /** Stop scrubbing and follow the live latest frame. */
+  goLive(): void {
+    this.viewIndex.set(null);
+  }
+
+  /** Active cases (E + I) per buffered frame for one country (for sparklines). */
+  seriesFor(iso: string): number[] {
+    this.frameTick(); // re-run on every new frame (even when the buffer is full)
+    return this.frames.map((f) => {
+      const c = f.countries.find((x) => x.iso === iso);
+      return c ? c.e + c.i : 0;
+    });
   }
 
   /**
@@ -131,6 +196,16 @@ export class SimulationService {
    */
   setSpeed(speed: number): void {
     this.send({ type: 'setSpeed', speed });
+  }
+
+  /**
+   * Set the intervention level (lockdown / border closure) for one country.
+   *
+   * @param iso ISO 3166-1 alpha-3 country code.
+   * @param value Strength in [0, 1].
+   */
+  setCountryIntervention(iso: string, value: number): void {
+    this.send({ type: 'setCountryIntervention', iso, value });
   }
 
   /**
@@ -172,27 +247,63 @@ export class SimulationService {
     return firstValueFrom(this.http.get(`${API_BASE}/api/geojson`));
   }
 
+  /** Fetch the flight network (country-pair routes) used by the map arcs. */
+  getFlights(): Promise<unknown> {
+    return firstValueFrom(this.http.get(`${API_BASE}/api/flights`));
+  }
+
+  // -- save / restore (complete state) --------------------------------
+
   /**
-   * Export the current full state (day, params, speed, per-country compartments).
-   *
-   * @param name Label to store in the scenario.
+   * Export the COMPLETE state: the whole frame buffer. The chart history, the
+   * current live state and the map replay are all derivable from it.
    */
-  exportScenario(name: string): Promise<Scenario> {
-    return firstValueFrom(
-      this.http.get<Scenario>(`${API_BASE}/api/scenario`, { params: { name } }),
-    );
+  exportState(): SavedState {
+    return { version: 3, frames: this.frames };
   }
 
   /**
-   * Import a scenario: the backend restores the state and broadcasts it. The
-   * local history and slider model are synced first so the incoming snapshot
-   * lands cleanly.
+   * Restore a complete state produced by {@link exportState}: rebuild the frame
+   * buffer, the chart history and the displayed snapshot locally, then sync the
+   * backend engine to the last frame so play/step continue from there.
    *
-   * @param data Scenario to load.
+   * @param data The saved state (frame buffer).
    */
-  async importScenario(data: Scenario): Promise<void> {
-    this.history.set([]);
-    if (data.params) this.params.set({ ...data.params });
-    await firstValueFrom(this.http.post(`${API_BASE}/api/scenario`, data));
+  async importState(data: SavedState): Promise<void> {
+    const frames = (Array.isArray(data?.frames) ? data.frames : []).slice(-FRAME_LIMIT);
+    this.frames = frames;
+    this.history.set(frames.map((f) => ({ day: f.day, totals: f.totals })));
+    this.frameCount.set(frames.length);
+    this.frameTick.set(this.frameTick() + 1);
+    this.viewIndex.set(null);
+
+    if (frames.length === 0) {
+      this.snapshot.set(null);
+      return;
+    }
+
+    const last = frames[frames.length - 1];
+    // Show the restored frame paused.
+    this.snapshot.set({ ...last, running: false });
+    this.params.set({ ...last.params });
+
+    // Sync the backend engine so a subsequent play/step continues from here.
+    const scenario: Scenario = {
+      name: 'import',
+      day: last.day,
+      params: last.params,
+      speed: last.speed,
+      countries: last.countries.map((c) => ({
+        iso: c.iso,
+        s: c.s,
+        e: c.e,
+        i: c.i,
+        r: c.r,
+        d: c.d,
+        v: c.v,
+        intervention: c.intervention,
+      })),
+    };
+    await firstValueFrom(this.http.post(`${API_BASE}/api/scenario`, scenario));
   }
 }

@@ -128,6 +128,7 @@ class SeirModel:
         self.R = np.zeros(self.n)
         self.D = np.zeros(self.n)
         self.V = np.zeros(self.n)
+        self.C = np.zeros(self.n)
 
     def reset(self) -> None:
         """Return everyone to the susceptible compartment (S = N, rest = 0)."""
@@ -137,6 +138,7 @@ class SeirModel:
         self.R[:] = 0
         self.D[:] = 0
         self.V[:] = 0
+        self.C[:] = 0
 
     def seed(self, idx: int, count: float) -> None:
         """Introduce an initial outbreak.
@@ -166,8 +168,12 @@ class SeirModel:
         safe_N = np.where(self.N > 0, self.N, 1.0)
         prevalence = self.I / safe_N
 
-        local_force = beta_eff * prevalence
-        imported_force = p.mobility * (self.W @ prevalence)
+        # Per-country intervention dampens both local spread and travel: a
+        # locked-down country transmits/exports less, and imports less.
+        open_frac = 1.0 - self.C
+        eff_prev = prevalence * open_frac
+        local_force = beta_eff * eff_prev
+        imported_force = p.mobility * open_frac * (self.W @ eff_prev)
         lam = local_force + imported_force
 
         # Cap every transition to the people actually available in the source
@@ -233,6 +239,19 @@ class SimulationEngine:
         if idx is not None:
             self.model.seed(idx, count)
 
+    def set_country_intervention(self, iso: str, value: float) -> None:
+        """Set the intervention level (0..1) for a single country.
+
+        Unknown ISO codes are ignored.
+
+        Args:
+            iso: ISO 3166-1 alpha-3 country code.
+            value: Lockdown/border-closure strength, clamped to [0, 1].
+        """
+        idx = self.index.get(iso)
+        if idx is not None:
+            self.model.C[idx] = max(0.0, min(1.0, value))
+
     # -- scenario save/restore (full live state) ------------------------
     def to_scenario(self, name: str = "scenario") -> dict:
         """Serialise the full live state so it can be restored exactly.
@@ -257,9 +276,10 @@ class SimulationEngine:
                 "r": float(m.R[i]),
                 "d": float(m.D[i]),
                 "v": float(m.V[i]),
+                "intervention": float(m.C[i]),
             }
             for i, c in enumerate(self.countries)
-            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 0.5
+            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 0.5 or m.C[i] > 0
         ]
         return {
             "name": name,
@@ -295,6 +315,7 @@ class SimulationEngine:
             m.R[idx] = float(rec.get("r", 0.0))
             m.D[idx] = float(rec.get("d", 0.0))
             m.V[idx] = float(rec.get("v", 0.0))
+            m.C[idx] = max(0.0, min(1.0, float(rec.get("intervention", 0.0))))
 
     def set_params(self, params: Params) -> None:
         """Replace the active parameters (applied on the next step)."""
@@ -324,6 +345,7 @@ class SimulationEngine:
                 r=float(m.R[i]),
                 d=float(m.D[i]),
                 v=float(m.V[i]),
+                intervention=float(m.C[i]),
             )
             for i, c in enumerate(self.countries)
         ]

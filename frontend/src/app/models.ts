@@ -57,6 +57,8 @@ export interface CountrySnapshot {
   d: number;
   /** Vaccinated count. */
   v: number;
+  /** Per-country intervention level in [0, 1]. */
+  intervention: number;
 }
 
 /** A single simulation frame received over the WebSocket. */
@@ -111,7 +113,10 @@ export interface HistoryPoint {
   totals: Totals;
 }
 
-/** A saved simulation: the full live state, restorable exactly. */
+/**
+ * A single live-state snapshot used to sync the backend engine on import
+ * (the body of `POST /api/scenario`).
+ */
 export interface Scenario {
   /** Scenario label. */
   name: string;
@@ -133,5 +138,17 @@ export interface Scenario {
     r: number;
     d: number;
     v: number;
+    intervention: number;
   }[];
+}
+
+/**
+ * A complete saved simulation: the full frame buffer (timeline). Everything
+ * else — chart history, current live state, map replay — is derived from it.
+ */
+export interface SavedState {
+  /** File-format version. */
+  version: number;
+  /** Every buffered snapshot, oldest first. */
+  frames: Snapshot[];
 }
