@@ -171,6 +171,8 @@ export class WorldMap implements AfterViewInit, OnDestroy {
   private prevInfected = new Set<string>();
   /** SVG renderer dedicated to the animated flight arcs. */
   private arcRenderer?: L.SVG;
+  /** Re-fits the Leaflet map when its container changes size (resize/rotate). */
+  private resizeObs?: ResizeObserver;
   /** Arcs currently animating (capped to avoid clutter). */
   private activeArcs = 0;
   /** ISO3 of the hovered country, whose border the snapshot effect leaves alone. */
@@ -283,6 +285,11 @@ export class WorldMap implements AfterViewInit, OnDestroy {
     // Dedicated SVG renderer so the flight arcs can be animated via CSS.
     this.arcRenderer = L.svg();
     this.arcRenderer.addTo(map);
+
+    // Leaflet doesn't track container resizes on its own: re-fit on every
+    // size change (window resize, orientation flip, responsive layout switch).
+    this.resizeObs = new ResizeObserver(() => map.invalidateSize());
+    this.resizeObs.observe(this.mapEl().nativeElement);
 
     void this.loadData(map);
   }
@@ -476,6 +483,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
 
   /** Tear down the Leaflet map to release DOM and event listeners. */
   ngOnDestroy(): void {
+    this.resizeObs?.disconnect();
     this.map?.remove();
   }
 }
@@ -527,8 +535,9 @@ export class EpiChart implements AfterViewInit, OnDestroy {
       if (!this.chart) return;
       const days = history.map((p) => p.day);
       const cursor = this.sim.viewing() ? this.sim.day() : null;
+      const interval = Math.max(0, Math.ceil(days.length / 8) - 1);
       this.chart.setOption({
-        xAxis: { data: days },
+        xAxis: { data: days, axisLabel: { interval } },
         series: SERIES.map((s, idx) => ({
           data: history.map((p) => Math.round(p.totals[s.key])),
           markLine: idx === 0 ? this.cursorMarkLine(cursor) : undefined,
@@ -556,63 +565,74 @@ export class EpiChart implements AfterViewInit, OnDestroy {
     });
     this.chart = chart;
     chart.setOption({
-      backgroundColor: 'transparent',
-      grid: { left: 58, right: 18, top: 42, bottom: 30 },
-      tooltip: {
-        trigger: 'axis',
-        backgroundColor: 'rgba(16, 22, 36, 0.95)',
-        borderColor: 'rgba(120, 140, 175, 0.32)',
-        borderWidth: 1,
-        textStyle: { color: '#eef2f9', fontFamily: 'Inter' },
-        axisPointer: {
+      media: [
+        {
+          query: { maxWidth: 560 },
+          option: {
+            grid: { top: 60, left: 50, right: 12 },
+            legend: { itemGap: 10, itemWidth: 12, textStyle: { fontSize: 11 } },
+          },
+        },
+      ],
+      baseOption: {
+        backgroundColor: 'transparent',
+        grid: { left: 58, right: 18, top: 48, bottom: 30 },
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: 'rgba(16, 22, 36, 0.95)',
+          borderColor: 'rgba(120, 140, 175, 0.32)',
+          borderWidth: 1,
+          textStyle: { color: '#eef2f9', fontFamily: 'Inter' },
+          axisPointer: {
+            type: 'line',
+            lineStyle: { color: 'rgba(150, 170, 205, 0.35)', type: 'dashed' },
+          },
+        },
+        legend: {
+          textStyle: { color: '#93a0b8', fontFamily: 'Inter', padding: [0, 0, 0, 4] },
+          icon: 'roundRect',
+          itemWidth: 14,
+          itemHeight: 4,
+          itemGap: 16,
+          top: 8,
+        },
+        xAxis: {
+          type: 'category',
+          boundaryGap: false,
+          name: 'giorni',
+          nameTextStyle: { color: '#5f6c82' },
+          axisLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.2)' } },
+          axisTick: { show: false },
+          axisLabel: { color: '#8190a8', showMaxLabel: true, hideOverlap: true },
+          data: [],
+        },
+        yAxis: {
+          type: 'value',
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.1)' } },
+          axisLabel: {
+            color: '#5f6c82',
+            formatter: (v: number) => this.compact(v),
+          },
+        },
+        animationDuration: 300,
+        series: SERIES.map((s) => ({
+          name: s.name,
           type: 'line',
-          lineStyle: { color: 'rgba(150, 170, 205, 0.35)', type: 'dashed' },
-        },
+          showSymbol: false,
+          smooth: true,
+          lineStyle: { width: 2.5, color: s.color },
+          itemStyle: { color: s.color },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: fade(s.color, 0.35) },
+              { offset: 1, color: fade(s.color, 0) },
+            ]),
+          },
+          data: [],
+        })),
       },
-      legend: {
-        textStyle: { color: '#93a0b8', fontFamily: 'Inter', padding: [0, 0, 0, 4] },
-        icon: 'roundRect',
-        itemWidth: 14,
-        itemHeight: 4,
-        itemGap: 22,
-        top: 8,
-      },
-      xAxis: {
-        type: 'category',
-        boundaryGap: false,
-        name: 'giorni',
-        nameTextStyle: { color: '#5f6c82' },
-        axisLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.2)' } },
-        axisTick: { show: false },
-        axisLabel: { color: '#5f6c82' },
-        data: [],
-      },
-      yAxis: {
-        type: 'value',
-        axisLine: { show: false },
-        axisTick: { show: false },
-        splitLine: { lineStyle: { color: 'rgba(120, 140, 175, 0.1)' } },
-        axisLabel: {
-          color: '#5f6c82',
-          formatter: (v: number) => this.compact(v),
-        },
-      },
-      animationDuration: 300,
-      series: SERIES.map((s) => ({
-        name: s.name,
-        type: 'line',
-        showSymbol: false,
-        smooth: true,
-        lineStyle: { width: 2.5, color: s.color },
-        itemStyle: { color: s.color },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: fade(s.color, 0.35) },
-            { offset: 1, color: fade(s.color, 0) },
-          ]),
-        },
-        data: [],
-      })),
     });
     window.addEventListener('resize', this.onResize);
   }

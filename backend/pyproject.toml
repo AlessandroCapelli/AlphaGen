@@ -19,7 +19,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["app"]
+python_files = ["test.py", "test_*.py"]
 addopts = "-ra -q"
 markers = [
     "unit: pure in-process unit tests (model/validation)",
