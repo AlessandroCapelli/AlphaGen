@@ -143,14 +143,14 @@ class SeirModel:
     def seed(self, idx: int, count: float) -> None:
         """Introduce an initial outbreak.
 
-        Moves ``count`` people (capped at the available susceptibles) from S to
-        I in the country at position ``idx``.
+        Moves ``count`` people (clamped to the available susceptibles, and never
+        negative) from S to I in the country at position ``idx``.
 
         Args:
             idx: Index of the country in the population/compartment arrays.
             count: Number of individuals to move into the infectious compartment.
         """
-        count = min(count, self.S[idx])
+        count = max(0.0, min(count, self.S[idx]))
         self.S[idx] -= count
         self.I[idx] += count
 
@@ -257,8 +257,9 @@ class SimulationEngine:
         """Serialise the full live state so it can be restored exactly.
 
         Captures the day, parameters, speed and the compartment counts of every
-        affected country. Fully-susceptible countries are omitted (they are
-        rebuilt as S = N on restore), keeping the payload small.
+        affected country. Only fully-susceptible, intervention-free countries are
+        omitted (they are rebuilt as S = N on restore), keeping the payload small
+        while still preserving sub-unit nascent outbreaks seeded via travel.
 
         Args:
             name: Label stored alongside the scenario.
@@ -279,7 +280,7 @@ class SimulationEngine:
                 "intervention": float(m.C[i]),
             }
             for i, c in enumerate(self.countries)
-            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 0.5 or m.C[i] > 0
+            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 1e-6 or m.C[i] > 0
         ]
         return {
             "name": name,
@@ -309,12 +310,12 @@ class SimulationEngine:
             idx = self.index.get(rec.get("iso", ""))
             if idx is None:
                 continue
-            m.S[idx] = float(rec.get("s", m.N[idx]))
-            m.E[idx] = float(rec.get("e", 0.0))
-            m.I[idx] = float(rec.get("i", 0.0))
-            m.R[idx] = float(rec.get("r", 0.0))
-            m.D[idx] = float(rec.get("d", 0.0))
-            m.V[idx] = float(rec.get("v", 0.0))
+            m.S[idx] = max(0.0, float(rec.get("s", m.N[idx])))
+            m.E[idx] = max(0.0, float(rec.get("e", 0.0)))
+            m.I[idx] = max(0.0, float(rec.get("i", 0.0)))
+            m.R[idx] = max(0.0, float(rec.get("r", 0.0)))
+            m.D[idx] = max(0.0, float(rec.get("d", 0.0)))
+            m.V[idx] = max(0.0, float(rec.get("v", 0.0)))
             m.C[idx] = max(0.0, min(1.0, float(rec.get("intervention", 0.0))))
 
     def set_params(self, params: Params) -> None:

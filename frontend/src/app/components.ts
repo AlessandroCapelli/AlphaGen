@@ -85,7 +85,7 @@ interface CountryDetail {
   iso: string;
   name: string;
   population: number;
-  infectedPct: string;
+  activePct: string;
   intervention: number;
   /** SVG path of the country's active-case sparkline (empty if too short). */
   spark: string;
@@ -117,7 +117,7 @@ interface CountryDetail {
         <div class="country-card">
           <button class="cc-close" (click)="select(null)" aria-label="Chiudi">×</button>
           <h4>{{ d.name }}</h4>
-          <div class="cc-sub">{{ d.infectedPct }} infetti · pop. {{ fmt(d.population) }}</div>
+          <div class="cc-sub">{{ d.activePct }} casi attivi · pop. {{ fmt(d.population) }}</div>
           @if (d.spark) {
             <svg class="cc-spark" viewBox="0 0 100 30" preserveAspectRatio="none">
               <path [attr.d]="d.spark" />
@@ -193,7 +193,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
       iso: c.iso,
       name: c.name,
       population: c.population,
-      infectedPct: pct >= 1 ? `${pct.toFixed(1)}%` : `${pct.toFixed(3)}%`,
+      activePct: pct >= 1 ? `${pct.toFixed(1)}%` : `${pct.toFixed(3)}%`,
       intervention: c.intervention,
       spark: this.sparkPath(this.sim.seriesFor(c.iso)),
       rows: [
@@ -231,9 +231,9 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         }
         (layer as L.Path).setStyle(style);
         const name = (feat?.properties as { name?: string })?.name ?? '';
-        const infected = c ? Math.round(c.e + c.i) : 0;
+        const active = c ? Math.round(c.e) + Math.round(c.i) : 0;
         layer.setTooltipContent(
-          `<b>${name}</b><br>Infetti: ${infected.toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
+          `<b>${name}</b><br>Casi attivi: ${active.toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
         );
       });
 
@@ -656,14 +656,14 @@ interface Ctrl {
   pct?: boolean;
 }
 
-/** Slider definitions, in display order. */
+/** Slider definitions, in display order. Ranges mirror the model's valid bounds in `backend/app/models.py`. */
 const CONTROLS: Ctrl[] = [
-  { key: 'r0', label: 'R₀ — trasmissibilità', min: 0, max: 15, step: 0.1 },
+  { key: 'r0', label: 'R₀ — trasmissibilità', min: 0, max: 20, step: 0.1 },
   { key: 'intervention', label: 'Interventi (riduzione contatti)', min: 0, max: 1, step: 0.01, pct: true },
-  { key: 'vaccination_rate', label: 'Vaccinazione / giorno', min: 0, max: 0.05, step: 0.001, pct: true },
-  { key: 'fatality_rate', label: 'Letalità', min: 0, max: 0.6, step: 0.005, pct: true },
-  { key: 'incubation_days', label: 'Incubazione (giorni)', min: 1, max: 21, step: 0.5 },
-  { key: 'infectious_days', label: 'Durata infettiva (giorni)', min: 1, max: 30, step: 0.5 },
+  { key: 'vaccination_rate', label: 'Vaccinazione / giorno', min: 0, max: 0.2, step: 0.001, pct: true },
+  { key: 'fatality_rate', label: 'Letalità', min: 0, max: 1, step: 0.005, pct: true },
+  { key: 'incubation_days', label: 'Incubazione (giorni)', min: 0.1, max: 30, step: 0.1 },
+  { key: 'infectious_days', label: 'Durata infettiva (giorni)', min: 0.1, max: 60, step: 0.1 },
   { key: 'mobility', label: 'Mobilità globale', min: 0, max: 5, step: 0.1 },
 ];
 
@@ -720,6 +720,7 @@ const CONTROLS: Ctrl[] = [
           max="30"
           step="1"
           [value]="sim.snapshot()?.speed ?? 5"
+          [disabled]="sim.viewing()"
           (input)="onSpeed($event)"
         />
       </section>
@@ -727,7 +728,7 @@ const CONTROLS: Ctrl[] = [
       <section class="block">
         <label class="field">
           <span>Preset malattia</span>
-          <select (change)="onPreset($event)">
+          <select [disabled]="sim.viewing()" (change)="onPreset($event)">
             <option value="">— scegli —</option>
             @for (p of presets(); track p.id) {
               <option [value]="p.id">{{ p.name }}</option>
@@ -754,6 +755,7 @@ const CONTROLS: Ctrl[] = [
               [max]="c.max"
               [step]="c.step"
               [value]="sim.params()[c.key]"
+              [disabled]="sim.viewing()"
               (input)="onSlider(c.key, $event)"
             />
           </div>

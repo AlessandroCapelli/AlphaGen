@@ -21,8 +21,12 @@ const WS_URL = 'ws://localhost:8000/ws';
 /** Maximum number of history points kept in memory for the chart. */
 const HISTORY_LIMIT = 10_000;
 
-/** Maximum number of full snapshots buffered for the timeline scrubber. */
-const FRAME_LIMIT = 600;
+/**
+ * Maximum number of full snapshots buffered for the timeline scrubber. Kept
+ * equal to {@link HISTORY_LIMIT} so the timeline covers the whole run and day 1
+ * stays reachable; only runs longer than this start dropping the oldest frames.
+ */
+const FRAME_LIMIT = HISTORY_LIMIT;
 
 /** Default number of initial infectious individuals when seeding an outbreak. */
 const DEFAULT_SEED_COUNT = 100;
@@ -50,6 +54,7 @@ const DEFAULT_PARAMS: Params = {
 export class SimulationService {
   private readonly http = inject(HttpClient);
   private socket?: WebSocket;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
 
   /** Whether the WebSocket is currently open. */
   readonly connected = signal(false);
@@ -90,14 +95,20 @@ export class SimulationService {
   /** Open the WebSocket connection. Idempotent: a no-op if already connected. */
   connect(): void {
     if (this.socket) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     const ws = new WebSocket(WS_URL);
     this.socket = ws;
     ws.onopen = () => this.connected.set(true);
     ws.onclose = () => {
       this.connected.set(false);
       this.socket = undefined;
-      // Auto-reconnect (e.g. after a backend reload) until the socket is back.
-      setTimeout(() => this.connect(), 1500);
+      // Auto-reconnect (e.g. after a backend reload). Keep a single pending
+      // timer so repeated close events can't pile up timers.
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = setTimeout(() => this.connect(), 1500);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => this.onMessage(ev);
@@ -114,14 +125,23 @@ export class SimulationService {
       this.frames = [data];
       this.viewIndex.set(null);
     } else {
-      const next = [...this.history(), { day: data.day, totals: data.totals }];
-      if (next.length > HISTORY_LIMIT) next.shift();
-      this.history.set(next);
-      this.frames.push(data);
-      if (this.frames.length > FRAME_LIMIT) {
-        this.frames.shift();
-        const vi = this.viewIndex();
-        if (vi !== null) this.viewIndex.set(Math.max(0, vi - 1));
+      const hist = this.history();
+      const last = hist[hist.length - 1];
+      const point = { day: data.day, totals: data.totals };
+      if (last && last.day === data.day) {
+        this.history.set([...hist.slice(0, -1), point]);
+        if (this.frames.length > 0) this.frames[this.frames.length - 1] = data;
+        else this.frames.push(data);
+      } else {
+        const next = [...hist, point];
+        if (next.length > HISTORY_LIMIT) next.shift();
+        this.history.set(next);
+        this.frames.push(data);
+        if (this.frames.length > FRAME_LIMIT) {
+          this.frames.shift();
+          const vi = this.viewIndex();
+          if (vi !== null) this.viewIndex.set(Math.max(0, vi - 1));
+        }
       }
     }
     this.frameCount.set(this.frames.length);
@@ -161,8 +181,12 @@ export class SimulationService {
 
   /** Scrub to a buffered frame; the last index (or null) returns to live. */
   setViewIndex(i: number | null): void {
-    if (i === null || i >= this.frames.length - 1) this.viewIndex.set(null);
-    else this.viewIndex.set(Math.max(0, i));
+    if (i === null || i >= this.frames.length - 1) {
+      this.viewIndex.set(null);
+    } else {
+      if (this.running()) this.pause();
+      this.viewIndex.set(Math.max(0, i));
+    }
   }
 
   /** Stop scrubbing and follow the live latest frame. */
@@ -170,13 +194,19 @@ export class SimulationService {
     this.viewIndex.set(null);
   }
 
-  /** Active cases (E + I) per buffered frame for one country (for sparklines). */
+  /**
+   * Active cases (E + I) for one country over the most recent
+   * {@link HISTORY_LIMIT} frames (for the detail-card sparkline).
+   */
   seriesFor(iso: string): number[] {
-    this.frameTick(); // re-run on every new frame (even when the buffer is full)
-    return this.frames.map((f) => {
-      const c = f.countries.find((x) => x.iso === iso);
-      return c ? c.e + c.i : 0;
-    });
+    this.frameTick();
+    const start = Math.max(0, this.frames.length - HISTORY_LIMIT);
+    const out: number[] = [];
+    for (let k = start; k < this.frames.length; k++) {
+      const c = this.frames[k].countries.find((x) => x.iso === iso);
+      out.push(c ? c.e + c.i : 0);
+    }
+    return out;
   }
 
   /**
@@ -270,7 +300,10 @@ export class SimulationService {
    * @param data The saved state (frame buffer).
    */
   async importState(data: SavedState): Promise<void> {
-    const frames = (Array.isArray(data?.frames) ? data.frames : []).slice(-FRAME_LIMIT);
+    if (!data || data.version !== 3 || !Array.isArray(data.frames)) {
+      throw new Error('Formato di stato non riconosciuto (atteso version 3).');
+    }
+    const frames = data.frames.slice(-FRAME_LIMIT);
     this.frames = frames;
     this.history.set(frames.map((f) => ({ day: f.day, totals: f.totals })));
     this.frameCount.set(frames.length);

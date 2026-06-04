@@ -215,6 +215,25 @@ mappa), `flights.json` (rete voli tra nazioni) e `presets.json` (malattie).
   peso di ogni coppia di paesi è il numero di rotte aeree tra essi (normalizzato),
   usato come proxy reale di connettività; la mappatura ISO usa REST Countries.
 
+## Test
+
+### Backend (pytest)
+
+```bash
+cd backend
+uv run pytest                 # tutta la suite (avvia un'istanza uvicorn reale)
+uv run pytest -m unit         # solo i test in-process
+uv run pytest -m integration  # solo REST + WebSocket contro l'istanza reale
+```
+
+### Frontend (Playwright)
+
+```bash
+cd frontend
+npx playwright install chromium   # una tantum
+npm run e2e
+```
+
 ## Licenza
 
 Distribuito con licenza **MIT**. Vedi il file [`LICENSE`](LICENSE).

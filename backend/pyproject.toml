@@ -8,3 +8,21 @@ dependencies = [
     "numpy>=2.4.6",
     "uvicorn[standard]>=0.48.0",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "websockets>=16.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "unit: pure in-process unit tests (model/validation)",
+    "integration: tests against a real running uvicorn instance",
+    "data: dataset integrity checks",
+]

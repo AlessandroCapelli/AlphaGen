@@ -23,6 +23,13 @@ dist/
 .angular/
 .sass-cache/
 
+# Tests
+.pytest_cache/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Editors / IDEs
 .idea/
 .history/

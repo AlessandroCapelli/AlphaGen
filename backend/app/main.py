@@ -71,7 +71,7 @@ class ConnectionManager:
             return
         payload = {"type": "snapshot", **engine.snapshot().model_dump()}
         dead = []
-        for ws in self.active:
+        for ws in list(self.active):
             try:
                 await ws.send_json(payload)
             except Exception:
@@ -120,7 +120,9 @@ async def _handle_command(
     elif cmd == "seed":
         engine.seed(msg.get("iso", ""), float(msg.get("count", 100)))
     elif cmd == "setParams":
-        engine.set_params(Params(**msg.get("params", {})))
+        merged = engine.params.model_dump()
+        merged.update(msg.get("params", {}))
+        engine.set_params(Params(**merged))
     elif cmd == "setSpeed":
         engine.set_speed(float(msg.get("speed", 5)))
     elif cmd == "setCountryIntervention":
@@ -248,13 +250,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await mgr.broadcast_snapshot(eng)
     try:
         while True:
-            msg = await ws.receive_json()
+            try:
+                msg = await ws.receive_json()
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                continue
             try:
                 await _handle_command(msg, eng, mgr)
             except Exception:
-                # A single malformed command must not drop the connection.
                 pass
-    except WebSocketDisconnect:
-        pass
     finally:
         mgr.disconnect(ws)
