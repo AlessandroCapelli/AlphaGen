@@ -143,12 +143,15 @@ export interface Scenario {
 }
 
 /**
- * A complete saved simulation: the full frame buffer (timeline). Everything
- * else — chart history, current live state, map replay — is derived from it.
+ * A complete saved simulation: the full frame buffer (timeline). The current
+ * live state and the map replay are derived from it. The chart series
+ * is stored explicitly too, so a client that connected mid-run still round-trips its full chart history.
  */
 export interface SavedState {
   /** File-format version. */
   version: number;
   /** Every buffered snapshot, oldest first. */
   frames: Snapshot[];
+  /** Chart totals series. Falls back to the frames' totals when absent. */
+  history?: HistoryPoint[];
 }

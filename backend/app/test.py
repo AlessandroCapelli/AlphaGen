@@ -33,6 +33,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app import backup as backup_mod  # noqa: E402
+from app.backup import BackupWriter  # noqa: E402
 from app.models import CountryMeta, Params, Preset, Snapshot  # noqa: E402
 from app.simulation import (  # noqa: E402
     SeirModel,
@@ -42,11 +44,6 @@ from app.simulation import (  # noqa: E402
 )
 
 DATA = BACKEND_DIR / "app" / "data"
-
-
-# ============================================================
-# Snapshot invariants
-# ============================================================
 COMPARTMENTS = "seirdv"
 
 
@@ -91,9 +88,6 @@ def assert_monotonic_cumulative(prev: dict, totals: dict, tol: float = 1.0) -> N
         )
 
 
-# ============================================================
-# Real uvicorn instance + clients
-# ============================================================
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -117,7 +111,7 @@ def server() -> Iterator[dict]:
         try:
             if httpx.get(f"{base}/api/health", timeout=1.0).status_code == 200:
                 break
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last_err = e
         time.sleep(0.3)
     else:
@@ -160,9 +154,6 @@ def _reset_engine(request: pytest.FixtureRequest) -> None:
             httpx.post(f"{srv['base']}/api/scenario", json={}, timeout=5.0)
 
 
-# ============================================================
-# WebSocket helper
-# ============================================================
 class WSClient:
     """Thin async wrapper: send a command dict, receive the next snapshot."""
 
@@ -197,7 +188,6 @@ def ws_connect(ws_url: str):
     return _cm()
 
 
-# field -> (min, default, max)
 PARAM_GRID = {
     "r0": (0.0, 2.5, 20.0),
     "incubation_days": (0.1, 5.0, 30.0),
@@ -207,7 +197,6 @@ PARAM_GRID = {
     "intervention": (0.0, 0.0, 1.0),
     "mobility": (0.0, 1.0, 5.0),
 }
-# field -> (min_ok, max_ok, below_min, above_max)
 VALIDATION_BOUNDS = {
     "r0": (0, 20, -0.1, 20.1),
     "incubation_days": (0.1, 30, 0.0, 30.1),
@@ -219,7 +208,6 @@ VALIDATION_BOUNDS = {
 }
 
 
-# -- shared helpers ----------------------------------------------------
 def full_params(**over) -> dict:
     base = {
         "r0": 2.5,
@@ -261,7 +249,6 @@ async def recv_until(ws, pred, limit: int = 50):
     raise AssertionError("predicate never satisfied")
 
 
-# -- fixtures ----------------------------------------------------------
 @pytest.fixture
 def engine() -> SimulationEngine:
     return SimulationEngine()
@@ -284,9 +271,6 @@ def coupling(real_countries):
     return build_coupling(real_countries)
 
 
-# ============================================================
-# Engine & data loading (unit)
-# ============================================================
 @pytest.mark.unit
 class TestEngine:
     def test_load_countries_order(self):
@@ -402,7 +386,7 @@ class TestEngine:
     def test_engine_seed_intervention_speed(self, engine):
         engine.seed("USA", 100)
         assert engine.model.I[engine.index["USA"]] == 100
-        engine.seed("ZZZ", 100)  # unknown -> no-op
+        engine.seed("ZZZ", 100)
         engine.set_country_intervention("ITA", 0.6)
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(0.6)
 
@@ -427,19 +411,18 @@ class TestEngine:
             sum(c["s"] for c in snap["countries"]), rel=1e-9
         )
 
-    def test_to_scenario_threshold(self, engine):
+    def test_to_scenario_full_coverage(self, engine):
         idx = engine.index["FRA"]
         engine.model.E[idx] = 0.2
         engine.model.S[idx] -= 0.2
         engine.seed("USA", 1000)
         scen = engine.to_scenario()
         isos = {c["iso"] for c in scen["countries"]}
-        assert "FRA" in isos  # sub-unit outbreak preserved
-        assert "USA" in isos
-        assert "JPN" not in isos  # pristine omitted
+        assert len(scen["countries"]) == len(engine.countries) == 245
+        assert {"FRA", "USA", "JPN"} <= isos
 
     def test_apply_scenario_variants(self, engine):
-        engine.apply_scenario({"countries": [{"iso": "ZZZ", "i": 5}]})  # unknown ok
+        engine.apply_scenario({"countries": [{"iso": "ZZZ", "i": 5}]})
         engine.apply_scenario({"countries": [{"iso": "ITA", "intervention": 5.0}]})
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(1.0)
         engine.apply_scenario({"params": {"r0": 9.0}})
@@ -451,17 +434,163 @@ class TestEngine:
         assert engine.day == 0 and np.allclose(engine.model.S, engine.model.N)
 
     def test_to_scenario_empty_world(self, engine):
-        assert engine.to_scenario()["countries"] == []
+        scen = engine.to_scenario()
+        assert len(scen["countries"]) == 245
+        assert all(
+            c["e"] == c["i"] == c["r"] == c["d"] == c["v"] == 0.0
+            for c in scen["countries"]
+        )
 
     def test_reset_clears_lockdown(self, engine):
         engine.set_country_intervention("ITA", 0.9)
         engine.reset()
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(0.0)
 
+    def test_replay_history_and_frames(self, engine):
+        engine.seed("USA", 1000)
+        for _ in range(5):
+            engine.step()
+        assert [p["day"] for p in engine.history_points()] == [0, 1, 2, 3, 4, 5]
+        fb = engine.frames_payload()
+        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == 245
+        assert [f["day"] for f in fb["frame"]] == [0, 1, 2, 3, 4, 5]
+        for f in fb["frame"]:
+            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == 245
+        engine.reset()
+        assert [p["day"] for p in engine.history_points()] == [0]
+        assert [f["day"] for f in engine.frames_payload()["frame"]] == [0]
 
-# ============================================================
-# ConnectionManager broadcast (unit)
-# ============================================================
+    def test_replay_frame_updates_in_place_on_seed(self, engine):
+        engine.seed("USA", 5000)
+        fb = engine.frames_payload()
+        assert len(fb["frame"]) == 1 and fb["frame"][0]["day"] == 0
+        assert fb["frame"][0]["i"][engine.index["USA"]] >= 4999
+
+    def test_replay_metadata_matches_countries(self, engine):
+        fb = engine.frames_payload()
+        assert fb["iso"] == [c.iso for c in engine.countries]
+        assert fb["name"] == [c.name for c in engine.countries]
+        assert fb["population"] == [
+            float(engine.model.N[i]) for i in range(engine.model.n)
+        ]
+
+    def test_replay_frames_match_live_state(self, engine):
+        engine.seed("USA", 100_000)
+        engine.seed("BRA", 20_000)
+        engine.set_params(Params(r0=4.0, fatality_rate=0.05))
+        for _ in range(30):
+            engine.step()
+        fb = engine.frames_payload()
+        ref = SimulationEngine()
+        ref.seed("USA", 100_000)
+        ref.seed("BRA", 20_000)
+        ref.set_params(Params(r0=4.0, fatality_rate=0.05))
+        for day in range(31):
+            frame = fb["frame"][day]
+            assert frame["day"] == day
+            for comp, arr in (
+                ("s", ref.model.S),
+                ("i", ref.model.I),
+                ("r", ref.model.R),
+            ):
+                assert frame[comp] == [int(round(x)) for x in arr.tolist()], (
+                    f"{comp} day {day}"
+                )
+            if day < 30:
+                ref.step()
+
+    def test_replay_history_totals_match_frames(self, engine):
+        engine.seed("USA", 200_000)
+        for _ in range(15):
+            engine.step()
+        pts = engine.history_points()
+        fb = engine.frames_payload()
+        assert [p["day"] for p in pts] == [f["day"] for f in fb["frame"]]
+        for p, f in zip(pts, fb["frame"]):
+            assert p["totals"]["i"] == pytest.approx(sum(f["i"]), abs=len(f["i"]))
+            assert p["totals"]["s"] == pytest.approx(sum(f["s"]), abs=len(f["s"]))
+
+    def test_replay_buffers_aligned_and_capped(self, monkeypatch):
+        import app.simulation as sim
+
+        monkeypatch.setattr(sim, "DATA_LIMIT", 5)
+        e = SimulationEngine()
+        e.seed("USA", 10_000)
+        for _ in range(20):
+            e.step()
+        h_days = [p["day"] for p in e.history_points()]
+        f_days = [f["day"] for f in e.frames_payload()["frame"]]
+        assert h_days == f_days == [16, 17, 18, 19, 20]
+
+    def test_replay_buffers_aligned_through_mixed_commands(self, engine):
+        for k in range(8):
+            engine.step()
+            if k % 3 == 0:
+                engine.seed("USA", 1000)
+            if k % 4 == 0:
+                engine.set_country_intervention("ITA", 0.5)
+        h_days = [p["day"] for p in engine.history_points()]
+        f_days = [f["day"] for f in engine.frames_payload()["frame"]]
+        assert h_days == f_days == list(range(9))
+
+    def test_set_params_and_speed(self, engine):
+        engine.set_params(Params(r0=9.0, mobility=3.0))
+        assert engine.params.r0 == 9.0 and engine.params.mobility == 3.0
+        engine.set_speed(12.0)
+        assert engine.speed == 12.0
+
+    def test_replay_frames_carry_intervention(self, engine):
+        engine.set_country_intervention("ITA", 0.7)
+        engine.set_country_intervention("FRA", 1.0)
+        engine.step()
+        fb = engine.frames_payload()
+        last = fb["frame"][-1]
+        assert last["c"][fb["iso"].index("ITA")] == pytest.approx(0.7)
+        assert last["c"][fb["iso"].index("FRA")] == pytest.approx(1.0)
+        assert last["params"]["r0"] == pytest.approx(engine.params.r0)
+
+    def test_apply_scenario_restores_speed_day_and_buffers(self):
+        src = SimulationEngine()
+        src.seed("USA", 100_000)
+        src.set_speed(17.0)
+        src.set_params(Params(r0=4.0))
+        for _ in range(12):
+            src.step()
+        dst = SimulationEngine()
+        dst.apply_scenario(src.to_scenario())
+        assert dst.day == src.day == 12
+        assert dst.speed == pytest.approx(17.0)
+        assert dst.params.r0 == pytest.approx(4.0)
+        assert [p["day"] for p in dst.history_points()] == [12]
+        assert [f["day"] for f in dst.frames_payload()["frame"]] == [12]
+
+    def test_coupling_includes_added_routes(self, coupling, real_countries):
+        idx = {c.iso: i for i, c in enumerate(real_countries)}
+        pairs = [
+            ("COD", "BEL"),
+            ("MMR", "THA"),
+            ("SYR", "ARE"),
+            ("KGZ", "RUS"),
+            ("BRN", "SGP"),
+            ("UNK", "TUR"),
+            ("MAC", "CHN"),
+            ("SWZ", "ZAF"),
+        ]
+        for a, b in pairs:
+            assert coupling[idx[a], idx[b]] > 1e-5, f"{a}->{b} not coupled"
+            assert coupling[idx[b], idx[a]] > 1e-5, f"{b}->{a} not coupled"
+
+    def test_every_preset_runs_stable(self):
+        presets = json.loads((DATA / "presets.json").read_text(encoding="utf-8"))
+        for p in presets:
+            e = SimulationEngine()
+            e.set_params(Params(**p["params"]))
+            e.seed("USA", 100_000)
+            for _ in range(40):
+                e.step()
+            assert engine_ok(e), p["id"]
+
+
 @pytest.mark.unit
 class TestConnectionManager:
     async def test_broadcast_tolerates_concurrent_active_mutation(self, engine):
@@ -476,11 +605,11 @@ class TestConnectionManager:
             async def send_json(self, payload):
                 if not added["done"]:
                     added["done"] = True
-                    mgr.active.add(FakeWS())  # simulate a concurrent connect
+                    mgr.active.add(FakeWS())
 
         mgr.active.add(FakeWS())
         mgr.active.add(FakeWS())
-        await mgr.broadcast_snapshot(engine)  # must not raise
+        await mgr.broadcast_snapshot(engine)
 
     async def test_broadcast_drops_dead_sockets(self, engine):
         from app.main import ConnectionManager
@@ -501,9 +630,6 @@ class TestConnectionManager:
         assert good in mgr.active and dead not in mgr.active
 
 
-# ============================================================
-# Pydantic validation (unit)
-# ============================================================
 @pytest.mark.unit
 class TestValidation:
     @pytest.mark.parametrize("field,bounds", VALIDATION_BOUNDS.items())
@@ -538,9 +664,6 @@ class TestValidation:
                 ctor()
 
 
-# ============================================================
-# Long run (10k days) & parameter matrix & fuzz (unit)
-# ============================================================
 @pytest.mark.unit
 class TestStability:
     @pytest.mark.parametrize(
@@ -663,9 +786,6 @@ class TestStability:
             assert engine_ok(e), f"seed={seed} step={n}"
 
 
-# ============================================================
-# Edge cases (unit)
-# ============================================================
 @pytest.mark.unit
 class TestEdge:
     def test_seed_every_country_conserves(self, engine):
@@ -692,9 +812,6 @@ class TestEdge:
         assert int(((engine.model.E + engine.model.I) >= 1).sum()) <= before
 
 
-# ============================================================
-# Export / import / continuation (unit)
-# ============================================================
 @pytest.mark.unit
 class TestScenarioUnit:
     def test_round_trip_identical_continuation(self):
@@ -740,10 +857,256 @@ class TestScenarioUnit:
         assert e2.model.C[e2.index["ITA"]] == pytest.approx(0.7)
         assert e2.model.C[e2.index["FRA"]] == pytest.approx(1.0)
 
+    def test_to_scenario_top_level_keys(self):
+        e = SimulationEngine()
+        e.set_speed(22.0)
+        e.set_params(Params(r0=3.3))
+        e.seed("USA", 1000)
+        e.step()
+        scen = e.to_scenario("my-run")
+        assert scen["name"] == "my-run"
+        assert scen["day"] == 1
+        assert scen["speed"] == pytest.approx(22.0)
+        assert scen["params"]["r0"] == pytest.approx(3.3)
+        assert all(
+            {"iso", "s", "e", "i", "r", "d", "v", "intervention"} <= c.keys()
+            for c in scen["countries"]
+        )
 
-# ============================================================
-# Dataset integrity (data)
-# ============================================================
+
+@pytest.mark.unit
+class TestBackup:
+    @staticmethod
+    def _engine(path) -> SimulationEngine:
+        return SimulationEngine(backup=BackupWriter(path))
+
+    @staticmethod
+    def _lines(path) -> list[str]:
+        return path.read_text(encoding="utf-8").strip().splitlines()
+
+    def test_default_engine_has_no_backup(self):
+        """The in-process default engine never touches disk (backup is opt-in)."""
+        e = SimulationEngine()
+        assert e._backup is None
+        e.seed("USA", 1000)
+        e.step()
+
+    def test_starts_with_header_and_day0(self, tmp_path):
+        path = tmp_path / "b.ndjson"
+        self._engine(path)
+        lines = self._lines(path)
+        assert len(lines) == 2
+        assert json.loads(lines[0])["kind"] == "header"
+        assert json.loads(lines[0])["version"] == 4
+        frame0 = json.loads(lines[1])
+        assert frame0["kind"] == "frame" and frame0["day"] == 0
+
+    def test_append_only_one_line_per_record(self, tmp_path):
+        """Each recorded day appends exactly one line — the backup is incremental,
+        never a full rewrite."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        n = len(self._lines(path))
+        e.seed("USA", 1000)
+        assert len(self._lines(path)) == n + 1
+        for _ in range(8):
+            before = len(self._lines(path))
+            e.step()
+            assert len(self._lines(path)) == before + 1
+
+    def test_reconstructs_saved_state(self, tmp_path):
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        e.seed("USA", 100_000)
+        e.set_params(Params(r0=4.0, fatality_rate=0.05))
+        for _ in range(20):
+            e.step()
+        state = backup_mod.load_saved_state(path)
+        assert state["version"] == 4
+        days = [f["day"] for f in state["frames"]]
+        assert days == list(range(21))
+        for f in state["frames"]:
+            assert f["type"] == "snapshot" and f["running"] is False
+            assert len(f["countries"]) == 245
+        live = e.frames_payload()
+        usa = live["iso"].index("USA")
+        for comp in ("s", "i", "r", "d"):
+            assert (
+                state["frames"][-1]["countries"][usa][comp]
+                == live["frame"][-1][comp][usa]
+            )
+
+    def test_saved_state_totals_and_history_aligned(self, tmp_path):
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        e.seed("USA", 50_000)
+        for _ in range(12):
+            e.step()
+        state = backup_mod.load_saved_state(path)
+        for f in state["frames"]:
+            for k in "seirdv":
+                assert f["totals"][k] == pytest.approx(
+                    sum(c[k] for c in f["countries"])
+                )
+        assert [h["day"] for h in state["history"]] == [
+            f["day"] for f in state["frames"]
+        ]
+
+    def test_scenario_round_trips_through_apply(self, tmp_path):
+        """The last-day scenario rebuilt from the backup imports cleanly and
+        resumes (the standard POST /api/scenario format)."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        e.seed("USA", 200_000)
+        e.seed("BRA", 50_000)
+        e.set_params(Params(r0=5.0, fatality_rate=0.03))
+        e.set_speed(13.0)
+        for _ in range(25):
+            e.step()
+        scen = backup_mod.load_scenario(path)
+        assert scen["day"] == 25 and scen["speed"] == pytest.approx(13.0)
+        assert scen["params"]["r0"] == pytest.approx(5.0)
+        dst = SimulationEngine()
+        dst.apply_scenario(scen)
+        assert dst.day == 25
+        for iso in ("USA", "BRA"):
+            want = next(c["i"] for c in scen["countries"] if c["iso"] == iso)
+            assert dst.model.I[dst.index[iso]] == pytest.approx(want)
+        assert dst.model.I.sum() > 0
+        dst.step()
+        assert dst.day == 26
+
+    def test_crash_recovery_resumes_from_last_day(self, tmp_path):
+        """Simulate a process restart: read recovery BEFORE the new engine
+        truncates the file (as the server's lifespan does), then resume."""
+        path = tmp_path / "b.ndjson"
+        a = self._engine(path)
+        a.seed("USA", 100_000)
+        a.set_params(Params(r0=4.0))
+        for _ in range(30):
+            a.step()
+        recovered = backup_mod.load_scenario(path)
+        b = self._engine(path)
+        b.apply_scenario(recovered)
+        assert b.day == 30
+        usa_i = next(c["i"] for c in recovered["countries"] if c["iso"] == "USA")
+        assert usa_i > 0
+        assert b.model.I[b.index["USA"]] == pytest.approx(usa_i)
+        assert [f["day"] for f in backup_mod.load_saved_state(path)["frames"]] == [30]
+        b.step()
+        assert [f["day"] for f in backup_mod.load_saved_state(path)["frames"]] == [
+            30,
+            31,
+        ]
+
+    def test_reset_starts_new_segment(self, tmp_path):
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        for _ in range(5):
+            e.step()
+        e.reset()
+        assert [f["day"] for f in backup_mod.load_saved_state(path)["frames"]] == [0]
+
+    def test_torn_final_line_is_skipped(self, tmp_path):
+        """A half-written final line (crash mid-append) must not break recovery."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        for _ in range(3):
+            e.step()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(
+                '{"kind": "frame", "day": 4, "s": [1, 2, 3'
+            )
+        state = backup_mod.load_saved_state(path)
+        assert [f["day"] for f in state["frames"]] == [0, 1, 2, 3]
+
+    def test_missing_file_is_none(self, tmp_path):
+        missing = tmp_path / "nope.ndjson"
+        assert backup_mod.load_scenario(missing) is None
+        assert backup_mod.load_saved_state(missing) is None
+
+    def test_last_wins_per_day_on_same_day_records(self, tmp_path):
+        """Multiple records for the same day (seed without stepping) collapse to
+        the latest state on load."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        e.seed("USA", 1000)
+        e.seed("USA", 4000)
+        state = backup_mod.load_saved_state(path)
+        assert [f["day"] for f in state["frames"]] == [0]
+        usa = next(c for c in state["frames"][0]["countries"] if c["iso"] == "USA")
+        assert usa["i"] == 5000
+
+    def test_load_saved_state_caps_to_retention(self, tmp_path, monkeypatch):
+        """The reconstructed timeline never exceeds the retention window, even if
+        the append-only log on disk is longer (it is never trimmed on disk)."""
+        monkeypatch.setattr(backup_mod, "MAX_RECOVERY_DAYS", 5)
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        e.seed("USA", 10_000)
+        for _ in range(20):
+            e.step()
+        state = backup_mod.load_saved_state(path)
+        days = [f["day"] for f in state["frames"]]
+        assert days == [16, 17, 18, 19, 20]
+        assert [h["day"] for h in state["history"]] == days
+
+    def test_restore_replays_full_timeline(self, tmp_path):
+        """Full-timeline recovery: a brand-new engine rebuilt from the backup
+        replays the ENTIRE pre-crash run (every day, both buffers), byte-identical
+        to the source's columnar replay — so a reconnecting client loses nothing."""
+        path = tmp_path / "b.ndjson"
+        a = self._engine(path)
+        a.seed("USA", 100_000)
+        a.seed("IND", 30_000)
+        a.set_params(Params(r0=3.8, fatality_rate=0.04))
+        a.set_country_intervention("ITA", 0.5)
+        for _ in range(50):
+            a.step()
+        state = backup_mod.load_saved_state(path)
+
+        b = SimulationEngine() 
+        b.restore(state)
+        assert b.day == 50
+        assert b.params.r0 == pytest.approx(3.8)
+        a_fb, b_fb = a.frames_payload(), b.frames_payload()
+        assert [f["day"] for f in b_fb["frame"]] == list(range(51))
+        assert [p["day"] for p in b.history_points()] == list(range(51))
+        assert b_fb["iso"] == a_fb["iso"]
+        assert b_fb["frame"] == a_fb["frame"]
+        assert b_fb["frame"][-1]["c"][b_fb["iso"].index("ITA")] == pytest.approx(0.5)
+
+    def test_restore_then_resume_keeps_appending(self, tmp_path):
+        """After a full restore the backup is rewritten as one continuous segment
+        (day 0..N) and keeps appending as the resumed run advances."""
+        path = tmp_path / "b.ndjson"
+        a = self._engine(path)
+        a.seed("USA", 50_000)
+        for _ in range(10):
+            a.step()
+        state = backup_mod.load_saved_state(path)
+
+        path2 = tmp_path / "b2.ndjson"
+        b = SimulationEngine(backup=BackupWriter(path2))
+        b.restore(state)
+        assert [f["day"] for f in backup_mod.load_saved_state(path2)["frames"]] == list(
+            range(11)
+        )
+        b.step()
+        assert [f["day"] for f in backup_mod.load_saved_state(path2)["frames"]] == list(
+            range(12)
+        )
+
+    def test_restore_empty_is_noop(self):
+        e = SimulationEngine()
+        e.seed("USA", 1000)
+        e.step()
+        e.restore({"frames": []})
+        assert e.day == 1
+        e.restore({})
+        assert e.day == 1
+
+
 @pytest.mark.data
 class TestData:
     @staticmethod
@@ -787,8 +1150,8 @@ class TestData:
         ids = [f.get("id") for f in geo["features"]]
         geo_iso = {i for i in ids if isinstance(i, str) and len(i) == 3 and i.isalpha()}
         non_iso = [i for i in ids if i not in geo_iso]
-        assert len(non_iso) <= 3
-        assert len(countries - geo_iso) <= 70
+        assert len(non_iso) == 0
+        assert len(countries - geo_iso) <= 10
         assert not (geo_iso - countries)
 
     @pytest.mark.parametrize(
@@ -798,9 +1161,6 @@ class TestData:
         self._load(name)
 
 
-# ============================================================
-# REST (integration, real instance)
-# ============================================================
 @pytest.mark.integration
 class TestRest:
     def test_health(self, client):
@@ -874,9 +1234,6 @@ class TestRest:
         assert again["day"] == exported["day"] and again["params"] == exported["params"]
 
 
-# ============================================================
-# WebSocket (integration, real instance)
-# ============================================================
 @pytest.mark.integration
 class TestWebSocket:
     async def test_initial_snapshot(self, ws_url):
@@ -884,6 +1241,20 @@ class TestWebSocket:
             s = await ws.recv()
             assert s["type"] == "snapshot"
             check_snapshot(s)
+
+    async def test_get_history_replay(self, ws_url):
+        async with ws_connect(ws_url) as ws:
+            await ws.recv()
+            await ws.command({"type": "seed", "iso": "USA", "count": 1000})
+            for _ in range(4):
+                await ws.command({"type": "step"})
+            await ws.send({"type": "getHistory"})
+            h = await recv_until(ws, lambda m: m.get("type") == "history")
+            assert [p["day"] for p in h["points"]] == [0, 1, 2, 3, 4]
+            fb = h["frames"]
+            assert len(fb["iso"]) == 245
+            assert [f["day"] for f in fb["frame"]] == [0, 1, 2, 3, 4]
+            assert fb["frame"][-1]["i"][fb["iso"].index("USA")] >= 1
 
     async def test_broadcast_to_all_clients(self, ws_url):
         import asyncio
@@ -939,13 +1310,13 @@ class TestWebSocket:
             assert next(c for c in s["countries"] if c["iso"] == "USA")[
                 "i"
             ] == pytest.approx(1000)
-            s = await ws.command({"type": "seed", "iso": "USA"})  # default 100
+            s = await ws.command({"type": "seed", "iso": "USA"})
             assert next(c for c in s["countries"] if c["iso"] == "USA")[
                 "i"
             ] == pytest.approx(1100)
             s = await ws.command(
                 {"type": "seed", "iso": "ZZZ", "count": 100}
-            )  # unknown
+            )
             check_snapshot(s)
 
     async def test_seed_negative_and_non_numeric(self, ws_url):
@@ -957,8 +1328,8 @@ class TestWebSocket:
             assert usa["i"] >= 0 and usa["s"] <= usa["population"]
             await ws.send(
                 {"type": "seed", "iso": "USA", "count": "abc"}
-            )  # raises server-side
-            check_snapshot(await ws.command({"type": "step"}))  # connection alive
+            )
+            check_snapshot(await ws.command({"type": "step"}))
 
     async def test_setparams_full_and_partial_merge(self, ws_url):
         async with ws_connect(ws_url) as ws:
@@ -975,7 +1346,7 @@ class TestWebSocket:
             )
             s = await ws.command(
                 {"type": "setParams", "params": {"r0": 7.5}}
-            )  # partial
+            )
             assert s["params"]["r0"] == 7.5
             assert (
                 s["params"]["infectious_days"] == 9
@@ -1012,10 +1383,10 @@ class TestWebSocket:
     async def test_robustness(self, ws_url):
         async with ws_connect(ws_url) as ws:
             await ws.recv()
-            await ws.send_raw("not-json")  # must not drop
+            await ws.send_raw("not-json")
             assert (await ws.command({"type": "step"}))["day"] == 1
-            await ws.send({"type": "totally-unknown"})  # ignored
-            await ws.send({"params": {"r0": 3}})  # missing type
+            await ws.send({"type": "totally-unknown"})
+            await ws.send({"params": {"r0": 3}})
             s = await ws.command({"type": "step", "garbage": 1, "extra": [1, 2]})
             assert s["day"] == 2
 
@@ -1029,7 +1400,7 @@ class TestWebSocket:
                 await ws.recv()
             s = await ws.command({"type": "reset"})
             assert s["day"] == 0
-        for _ in range(5):  # repeated reconnects keep the server healthy
+        for _ in range(5):
             async with ws_connect(ws_url) as ws:
                 check_snapshot(await ws.recv())
 
@@ -1056,9 +1427,6 @@ class TestWebSocket:
             await ws.command({"type": "pause"})
 
 
-# ============================================================
-# Import via REST -> continuation via WebSocket (integration)
-# ============================================================
 @pytest.mark.integration
 class TestScenarioIntegration:
     async def test_import_then_continue_over_ws(self, base_url, ws_url):
@@ -1086,3 +1454,84 @@ class TestScenarioIntegration:
                 0.0, abs=1e-6
             )
             assert (await ws.command({"type": "step"}))["day"] == 1
+
+
+@pytest.mark.integration
+class TestReplayCompleteness:
+    async def test_midrun_client_gets_complete_timeline(self, ws_url):
+        """A second client connecting mid-run must receive the COMPLETE per-day
+        totals series AND the full per-country timeline (every country, day 0..N)."""
+        n = 40
+        async with ws_connect(ws_url) as a:
+            await a.recv()
+            await a.command({"type": "seed", "iso": "USA", "count": 10_000})
+            await a.command({"type": "setParams", "params": full_params(r0=3.5)})
+            for _ in range(n):
+                await a.command({"type": "step"})
+            async with ws_connect(ws_url) as b:
+                await b.recv()
+                await b.send({"type": "getHistory"})
+                h = await recv_until(b, lambda m: m.get("type") == "history")
+        points, fb = h["points"], h["frames"]
+        assert [p["day"] for p in points] == list(range(n + 1))
+        assert [f["day"] for f in fb["frame"]] == list(range(n + 1))
+        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == 245
+        for f in fb["frame"]:
+            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == 245
+        last = fb["frame"][-1]
+        assert points[-1]["totals"]["i"] == pytest.approx(sum(last["i"]), abs=245)
+        assert last["i"][fb["iso"].index("USA")] >= 1
+
+    async def test_disconnect_reconnect_preserves_state(self, ws_url):
+        """Full disconnect then reconnect ('reload'): the shared engine keeps the
+        run, and re-requesting data ('reload data') replays the whole history."""
+        async with ws_connect(ws_url) as a:
+            await a.recv()
+            await a.command({"type": "seed", "iso": "USA", "count": 5000})
+            for _ in range(10):
+                await a.command({"type": "step"})
+        async with ws_connect(ws_url) as b:
+            first = await b.recv()
+            assert first["day"] == 10
+            await b.send({"type": "getHistory"})
+            h = await recv_until(b, lambda m: m.get("type") == "history")
+            assert [p["day"] for p in h["points"]] == list(range(11))
+            assert [f["day"] for f in h["frames"]["frame"]] == list(range(11))
+
+
+@pytest.mark.integration
+class TestBackupRest:
+    async def test_backup_endpoint_reflects_run(self, base_url, ws_url):
+        """The server auto-exports every day; GET /api/backup returns the run as
+        an importable SavedState covering day 0..N with all countries."""
+        async with ws_connect(ws_url) as ws:
+            await ws.recv()
+            await ws.command({"type": "seed", "iso": "USA", "count": 5000})
+            for _ in range(6):
+                await ws.command({"type": "step"})
+            with httpx.Client(base_url=base_url, timeout=5.0) as c:
+                state = c.get("/api/backup").json()
+        assert state["version"] == 4
+        days = [f["day"] for f in state["frames"]]
+        assert days[0] == 0 and days[-1] == 6
+        assert all(len(f["countries"]) == 245 for f in state["frames"])
+        usa = next(c for c in state["frames"][-1]["countries"] if c["iso"] == "USA")
+        assert usa["i"] >= 1
+
+    def test_backup_reimportable_as_scenario(self, client):
+        """The backup-derived SavedState's last frame round-trips back through
+        POST /api/scenario — the auto-export follows the importable standard."""
+        state = client.get("/api/backup").json()
+        last = state["frames"][-1]
+        scenario = {
+            "name": "from-backup",
+            "day": last["day"],
+            "params": last["params"],
+            "speed": last["speed"],
+            "countries": [
+                {k: c[k] for k in ("iso", "s", "e", "i", "r", "d", "v", "intervention")}
+                for c in last["countries"]
+            ],
+        }
+        r = client.post("/api/scenario", json=scenario)
+        assert r.json() == {"ok": True, "day": last["day"]}

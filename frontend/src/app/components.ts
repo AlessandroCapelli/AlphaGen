@@ -1,24 +1,23 @@
 import {
   AfterViewInit,
   Component,
+  DestroyRef,
+  Directive,
   ElementRef,
   OnDestroy,
   OnInit,
   computed,
   effect,
   inject,
+  input,
   signal,
-  viewChild,
+  viewChild
 } from '@angular/core';
 import * as echarts from 'echarts';
 import * as L from 'leaflet';
 
 import { CountrySnapshot, Params, Preset, SavedState } from './models';
-import { SimulationService } from './simulation.service';
-
-/* ============================================================
-   World map (app-world-map)
-   ============================================================ */
+import { CompartmentKey, SimulationService } from './simulation.service';
 
 /**
  * "Inferno"-style heat ramp (deep purple → magenta → orange → bright amber):
@@ -87,7 +86,6 @@ interface CountryDetail {
   population: number;
   activePct: string;
   intervention: number;
-  /** SVG path of the country's active-case sparkline (empty if too short). */
   spark: string;
   rows: DetailRow[];
 }
@@ -110,7 +108,7 @@ interface CountryDetail {
         <span class="title">Intensità contagio</span>
         <div class="legend-bar"></div>
         <div class="legend-scale"><span>basso</span><span>alto</span></div>
-        <div class="legend-lock"><span class="lk"></span> lockdown</div>
+        <div class="legend-lock"><span class="lk"></span> Lockdown</div>
       </div>
 
       @if (detail(); as d) {
@@ -143,6 +141,7 @@ interface CountryDetail {
               max="1"
               step="0.05"
               [value]="d.intervention"
+              [style.background]="lockFill(d.intervention)"
               [disabled]="viewing()"
               (input)="onLock(d.iso, $event)"
             />
@@ -177,9 +176,12 @@ export class WorldMap implements AfterViewInit, OnDestroy {
   private activeArcs = 0;
   /** ISO3 of the hovered country, whose border the snapshot effect leaves alone. */
   private hoveredIso: string | null = null;
+  /** Flips true once the choropleth layer exists; the colouring effect tracks it
+   *  so a snapshot that arrived before the (async) GeoJSON load still paints. */
+  private readonly geoReady = signal(false);
 
-  /** ISO3 of the country whose detail card is open, or null. */
-  protected readonly selectedIso = signal<string | null>(null);
+  /** ISO3 of the selected country (shared via the service with the leaderboard). */
+  protected readonly selectedIso = this.sim.selectedIso;
   /** Whether the timeline is being scrubbed (live actions are disabled then). */
   protected readonly viewing = this.sim.viewing;
 
@@ -210,47 +212,50 @@ export class WorldMap implements AfterViewInit, OnDestroy {
   });
 
   constructor() {
-    // Recolour the choropleth from the displayed frame (live or scrubbed) and,
-    // when following live, animate flight arcs for newly-infected countries.
     effect(() => {
+      this.geoReady();
       const snap = this.sim.displayed();
       if (!snap) return;
+      const sel = this.sim.selectedIso();
+      const metricLabel = this.sim.mapMetricLabel();
       const byIso = new Map(snap.countries.map((c) => [c.iso, c]));
 
       this.geoLayer?.eachLayer((layer) => {
         const feat = (layer as L.GeoJSON & { feature?: GeoJSON.Feature }).feature;
         const id = typeof feat?.id === 'string' ? feat.id : '';
         const c = byIso.get(id);
-        const ratio = c && c.population > 0 ? (c.e + c.i) / c.population : 0;
+        const value = c ? this.sim.mapMetric(c) : 0;
+        const ratio = c && c.population > 0 ? value / c.population : 0;
         const style: L.PathOptions = {
           fillColor: heatColor(ratio),
           fillOpacity: heatOpacity(ratio),
         };
         if (id !== this.hoveredIso) {
-          const locked = (c?.intervention ?? 0) > 0;
-          style.color = locked ? '#7dd3fc' : 'rgba(255, 255, 255, 0.12)';
-          style.weight = locked ? 1.6 : 0.4;
+          if (id === sel) {
+            style.color = '#ffffff';
+            style.weight = 2.4;
+          } else {
+            const locked = (c?.intervention ?? 0) > 0;
+            style.color = locked ? '#7dd3fc' : 'rgba(255, 255, 255, 0.12)';
+            style.weight = locked ? 1.6 : 0.4;
+          }
         }
         (layer as L.Path).setStyle(style);
+        if (id === sel) (layer as L.Path).bringToFront();
         const name = (feat?.properties as { name?: string })?.name ?? '';
-        const active = c ? Math.round(c.e) + Math.round(c.i) : 0;
         layer.setTooltipContent(
-          `<b>${name}</b><br>Casi attivi: ${active.toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
+          `<b>${name}</b><br>${metricLabel}: ${Math.round(value).toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
         );
       });
 
-      // Animated flight arcs only when following live (not while scrubbing):
-      // draw a curve from a likely infected source to each newly-infected country.
       if (this.sim.viewing()) return;
       const current = new Set<string>();
       for (const c of snap.countries) if (c.e + c.i >= 1) current.add(c.iso);
-      // A day-0 frame means reset/import: re-baseline without drawing arcs.
       if (snap.day === 0) {
         this.prevInfected = current;
         return;
       }
       const arrivals = [...current].filter((iso) => !this.prevInfected.has(iso));
-      // Skip bursts (initial load / scenario import) to avoid an arc storm.
       if (this.prevInfected.size > 0 && arrivals.length <= 20) {
         for (const dst of arrivals.slice(0, 6)) {
           if (this.activeArcs >= 24) break;
@@ -259,6 +264,13 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         }
       }
       this.prevInfected = current;
+    });
+
+    effect(() => {
+      const iso = this.sim.selectedIso();
+      if (!iso || !this.map) return;
+      const c = this.centroids.get(iso);
+      if (c) this.map.panTo(c, { animate: true, duration: 0.6 });
     });
   }
 
@@ -282,12 +294,9 @@ export class WorldMap implements AfterViewInit, OnDestroy {
       maxZoom: 8,
     }).addTo(map);
 
-    // Dedicated SVG renderer so the flight arcs can be animated via CSS.
     this.arcRenderer = L.svg();
     this.arcRenderer.addTo(map);
 
-    // Leaflet doesn't track container resizes on its own: re-fit on every
-    // size change (window resize, orientation flip, responsive layout switch).
     this.resizeObs = new ResizeObserver(() => map.invalidateSize());
     this.resizeObs.observe(this.mapEl().nativeElement);
 
@@ -312,6 +321,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
           }),
           onEachFeature: (feature, layer) => this.bindFeature(feature, layer),
         }).addTo(map);
+        this.geoReady.set(true);
       }
       if (this.centroids.size === 0) {
         for (const c of await this.sim.getCountries()) {
@@ -328,7 +338,6 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         }
       }
     } catch {
-      // Backend not ready — retry shortly (already-loaded steps are skipped).
       setTimeout(() => this.loadData(map), 1500);
     }
   }
@@ -355,11 +364,13 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         this.hoveredIso = null;
         const c = this.sim.displayed()?.countries.find((x) => x.iso === iso);
         const locked = (c?.intervention ?? 0) > 0;
-        (e.target as L.Path).setStyle(
-          locked
-            ? { weight: 1.6, color: '#7dd3fc' }
-            : { weight: 0.4, color: 'rgba(255, 255, 255, 0.12)' },
-        );
+        const reset: L.PathOptions =
+          iso === this.sim.selectedIso()
+            ? { weight: 2.4, color: '#ffffff' }
+            : locked
+              ? { weight: 1.6, color: '#7dd3fc' }
+              : { weight: 0.4, color: 'rgba(255, 255, 255, 0.12)' };
+        (e.target as L.Path).setStyle(reset);
       },
       click: () => {
         if (iso) this.select(iso);
@@ -408,6 +419,11 @@ export class WorldMap implements AfterViewInit, OnDestroy {
     return `${Math.round(v * 100)}%`;
   }
 
+  protected lockFill(v: number): string {
+    const p = Math.max(0, Math.min(100, v * 100));
+    return `linear-gradient(90deg, var(--accent) ${p}%, var(--track) ${p}%)`;
+  }
+
   /** Register a directed flight-adjacency entry. */
   private addNeighbor(from: string, to: string, w: number): void {
     const list = this.neighbors.get(from);
@@ -449,7 +465,6 @@ export class WorldMap implements AfterViewInit, OnDestroy {
       weight: 2,
       interactive: false,
     }).addTo(this.map);
-    // Normalise the path length so the CSS draw-on animation is length-agnostic.
     (line as unknown as { _path?: SVGPathElement })._path?.setAttribute('pathLength', '1');
     this.activeArcs++;
     setTimeout(() => {
@@ -466,7 +481,6 @@ export class WorldMap implements AfterViewInit, OnDestroy {
     const dy = lat2 - lat1;
     const dist = Math.hypot(dx, dy) || 1;
     const lift = Math.min(dist * 0.2, 25);
-    // Control point: the chord midpoint lifted perpendicular to the chord.
     const cx = (lon1 + lon2) / 2 + (-dy / dist) * lift;
     const cy = (lat1 + lat2) / 2 + (dx / dist) * lift;
     const pts: L.LatLngTuple[] = [];
@@ -487,10 +501,6 @@ export class WorldMap implements AfterViewInit, OnDestroy {
     this.map?.remove();
   }
 }
-
-/* ============================================================
-   Chart (app-epi-chart)
-   ============================================================ */
 
 /** Chart series: which `Totals` key to plot, its label and colour. */
 const SERIES = [
@@ -528,8 +538,6 @@ export class EpiChart implements AfterViewInit, OnDestroy {
   private readonly onResize = () => this.chart?.resize();
 
   constructor() {
-    // Push new data into the chart whenever the history grows or resets, and
-    // draw a cursor line at the scrubbed day while the timeline is being viewed.
     effect(() => {
       const history = this.sim.history();
       if (!this.chart) return;
@@ -656,9 +664,365 @@ export class EpiChart implements AfterViewInit, OnDestroy {
   }
 }
 
-/* ============================================================
-   Control panel (app-control-panel)
-   ============================================================ */
+/**
+ * Animates an element's text from its current value to a new number with an
+ * eased, thousands-separated count-up. Re-targets smoothly if the value changes
+ * mid-animation and renders an em dash while the value is undefined.
+ */
+@Directive({ selector: '[countUp]' })
+export class CountUp {
+  /** Target value (undefined before the first frame). */
+  readonly countUp = input<number | undefined>(undefined);
+
+  private readonly host = inject(ElementRef).nativeElement as HTMLElement;
+  private raf = 0;
+  private shown = 0;
+
+  constructor() {
+    effect(() => {
+      const target = this.countUp();
+      if (target === undefined) {
+        cancelAnimationFrame(this.raf);
+        this.host.textContent = '—';
+        return;
+      }
+      this.animate(target);
+    });
+    inject(DestroyRef).onDestroy(() => cancelAnimationFrame(this.raf));
+  }
+
+  private animate(target: number): void {
+    cancelAnimationFrame(this.raf);
+    const from = this.shown;
+    const diff = target - from;
+    if (Math.abs(diff) < 1) {
+      this.shown = target;
+      this.host.textContent = Math.round(target).toLocaleString('it-IT');
+      return;
+    }
+    const t0 = performance.now();
+    const dur = 450;
+    const tick = (t: number) => {
+      const p = Math.max(0, Math.min(1, (t - t0) / dur));
+      const eased = 1 - Math.pow(1 - p, 3);
+      this.shown = from + diff * eased;
+      this.host.textContent = Math.round(this.shown).toLocaleString('it-IT');
+      if (p < 1) this.raf = requestAnimationFrame(tick);
+      else this.shown = target;
+    };
+    this.raf = requestAnimationFrame(tick);
+  }
+}
+
+/**
+ * Paints the filled portion of a range slider with the accent colour up to the
+ * current value, so the position reads at a glance. Min/max are read from the
+ * element; pass the current value (a signal) as `[rangeFill]` so it stays in sync.
+ */
+@Directive({ selector: 'input[type=range][rangeFill]' })
+export class RangeFill {
+  /** Current slider value (drives the fill width). */
+  readonly rangeFill = input.required<number>();
+
+  private readonly el = inject(ElementRef).nativeElement as HTMLInputElement;
+
+  constructor() {
+    effect(() => {
+      const v = this.rangeFill();
+      const min = parseFloat(this.el.min || '0');
+      const max = parseFloat(this.el.max || '100');
+      const pct = max > min ? Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100)) : 0;
+      this.el.style.background = `linear-gradient(90deg, var(--accent) ${pct}%, var(--track) ${pct}%)`;
+    });
+  }
+}
+
+@Directive({ selector: '[infoTip]' })
+export class InfoTip {
+  /** Tooltip text. */
+  readonly infoTip = input.required<string>();
+
+  private readonly host = inject(ElementRef).nativeElement as HTMLElement;
+  private bubble: HTMLDivElement | null = null;
+  private pointer: string = 'mouse';
+  private readonly onDocDown = (e: Event) => {
+    if (!this.host.contains(e.target as Node)) this.hide();
+  };
+
+  constructor() {
+    this.host.addEventListener('pointerenter', (e) => {
+      this.pointer = (e as PointerEvent).pointerType;
+      if (this.pointer === 'mouse') this.show();
+    });
+    this.host.addEventListener('pointerleave', (e) => {
+      if ((e as PointerEvent).pointerType === 'mouse') this.hide();
+    });
+    this.host.addEventListener('click', (e) => {
+      if (this.pointer === 'mouse') return;
+      e.stopPropagation();
+      this.bubble ? this.hide() : this.show();
+    });
+    inject(DestroyRef).onDestroy(() => this.hide());
+  }
+
+  private show(): void {
+    if (this.bubble) return;
+    const b = document.createElement('div');
+    b.className = 'info-bubble';
+    b.textContent = this.infoTip();
+    document.body.appendChild(b);
+    this.bubble = b;
+
+    const r = this.host.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - b.offsetWidth / 2, window.innerWidth - b.offsetWidth - 8));
+    const above = r.top - b.offsetHeight - 8;
+    b.style.left = `${left}px`;
+    b.style.top = `${above >= 8 ? above : r.bottom + 8}px`;
+
+    setTimeout(() => document.addEventListener('pointerdown', this.onDocDown), 0);
+  }
+
+  private hide(): void {
+    if (!this.bubble) return;
+    this.bubble.remove();
+    this.bubble = null;
+    document.removeEventListener('pointerdown', this.onDocDown);
+  }
+}
+
+/** Metric the leaderboard ranks countries by. */
+type LbMetric = 'active' | 'deaths' | 'pct';
+
+/** One ranked row, derived from the displayed snapshot. */
+interface LbRow {
+  iso: string;
+  name: string;
+  rank: number;
+  /** Pre-formatted metric value for display. */
+  display: string;
+  /** Bar fill fraction in [0, 1] (value / leader's value). */
+  fill: number;
+  /** Rank change vs the ~1 s baseline (positive = climbed). */
+  delta: number;
+  /** SVG path of the active-case sparkline (empty if too short). */
+  spark: string;
+}
+
+const LB_TOP = 5;
+const LB_ROW_H = 40;
+const LB_TABS: readonly { key: LbMetric; label: string }[] = [
+  { key: 'active', label: 'Attivi' },
+  { key: 'deaths', label: 'Decessi' },
+  { key: 'pct', label: '% colpita' },
+];
+
+/**
+ * Live country leaderboard.
+ *
+ * Ranks countries by the selected metric from the displayed (live or scrubbed)
+ * snapshot, re-sorting every frame. Rows are absolutely positioned by rank and
+ * transition their transform, giving smooth FLIP-style reordering. Clicking a
+ * row selects the country (opening its card and centring it on the map).
+ */
+@Component({
+  selector: 'app-leaderboard',
+  host: { class: 'block leaderboard' },
+  template: `
+    <div class="lb-head">
+      <h3><span class="sec-ico">🏆</span> Classifica Paesi</h3>
+      <div class="lb-tabs">
+        @for (t of tabs; track t.key) {
+          <button class="lb-tab" [class.on]="metric() === t.key" (click)="setMetric(t.key)">
+            {{ t.label }}
+          </button>
+        }
+      </div>
+    </div>
+
+    @if (rows().length) {
+      <div class="lb-list" [style.height.px]="rows().length * rowH">
+        @for (r of rows(); track r.iso) {
+          <button
+            class="lb-row"
+            [class.sel]="r.iso === sim.selectedIso()"
+            [class.medal]="r.rank <= 3"
+            [style.transform]="'translateY(' + (r.rank - 1) * rowH + 'px)'"
+            (click)="sim.selectedIso.set(r.iso)"
+          >
+            <span class="lb-bar" [style.width.%]="r.fill * 100"></span>
+            <span class="lb-rank">{{ medal(r.rank) }}</span>
+            <span class="lb-name">{{ r.name }}</span>
+            @if (r.spark) {
+              <svg class="lb-spark" viewBox="0 0 60 20" preserveAspectRatio="none">
+                <path [attr.d]="r.spark" />
+              </svg>
+            }
+            <span class="lb-val">{{ r.display }}</span>
+            <span class="lb-delta" [class.up]="r.delta > 0" [class.down]="r.delta < 0">{{
+              deltaLabel(r.delta)
+            }}</span>
+          </button>
+        }
+      </div>
+    } @else {
+      <p class="lb-empty">Nessun contagio attivo: semina un focolaio per popolare la classifica.</p>
+    }
+  `,
+})
+export class Leaderboard {
+  protected readonly sim = inject(SimulationService);
+  protected readonly tabs = LB_TABS;
+  protected readonly rowH = LB_ROW_H;
+  /** Selected ranking metric. */
+  protected readonly metric = signal<LbMetric>('active');
+
+  /** Rank of each country in the ~1 s baseline, for the climb arrows. */
+  private baseline = new Map<string, number>();
+  private baselineAt = 0;
+
+  /** Ranked rows for the current metric, recomputed on every frame. */
+  protected readonly rows = computed<LbRow[]>(() => {
+    const snap = this.sim.displayed();
+    if (!snap) return [];
+    const metric = this.metric();
+    const scored = snap.countries
+      .map((c) => ({ iso: c.iso, name: c.name, value: this.metricValue(c, metric) }))
+      .filter((e) => e.value > 0)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, LB_TOP);
+    if (!scored.length) return [];
+    const lead = scored[0].value || 1;
+    const series = this.sim.activeSeries(scored.map((e) => e.iso));
+    return scored.map((e, i) => ({
+      iso: e.iso,
+      name: e.name,
+      rank: i + 1,
+      display: this.format(e.value, metric),
+      fill: e.value / lead,
+      delta: (this.baseline.get(e.iso) ?? i + 1) - (i + 1),
+      spark: this.spark(series.get(e.iso) ?? []),
+    }));
+  });
+
+  constructor() {
+    effect(() => {
+      const rows = this.rows();
+      const now = performance.now();
+      if (now - this.baselineAt > 1200) {
+        this.baseline = new Map(rows.map((r) => [r.iso, r.rank]));
+        this.baselineAt = now;
+      }
+    });
+  }
+
+  /** Switch metric and reset the baseline (ranks differ between metrics). */
+  protected setMetric(m: LbMetric): void {
+    if (m === this.metric()) return;
+    this.metric.set(m);
+    this.baseline.clear();
+    this.baselineAt = 0;
+  }
+
+  private metricValue(c: CountrySnapshot, m: LbMetric): number {
+    if (m === 'active') return c.e + c.i;
+    if (m === 'deaths') return c.d;
+    return c.population > 0 ? (c.e + c.i + c.r + c.d) / c.population : 0;
+  }
+
+  private format(v: number, m: LbMetric): string {
+    if (m === 'pct') return `${v * 100 >= 1 ? (v * 100).toFixed(1) : (v * 100).toFixed(2)}%`;
+    return Math.round(v).toLocaleString('it-IT');
+  }
+
+  protected medal(rank: number): string {
+    return rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : String(rank);
+  }
+
+  protected deltaLabel(delta: number): string {
+    if (delta > 0) return `▲${delta}`;
+    if (delta < 0) return `▼${-delta}`;
+    return '·';
+  }
+
+  /** Build a sparkline path inside a 60×20 box from an active-case series. */
+  private spark(values: number[]): string {
+    if (values.length < 2) return '';
+    const max = Math.max(...values, 1);
+    const n = values.length;
+    let d = '';
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 60;
+      const y = 18 - (values[i] / max) * 16;
+      d += `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)} `;
+    }
+    return d.trim();
+  }
+}
+
+interface TotalsChip {
+  key: CompartmentKey;
+  label: string;
+}
+
+const TOTALS_CHIPS: readonly TotalsChip[] = [
+  { key: 's', label: 'Suscettibili' },
+  { key: 'e', label: 'Esposti' },
+  { key: 'i', label: 'Infetti' },
+  { key: 'r', label: 'Guariti' },
+  { key: 'd', label: 'Deceduti' },
+  { key: 'v', label: 'Vaccinati' },
+];
+
+/**
+ * Worldwide compartment totals as a row of chips, shown directly above the map
+ * for an at-a-glance read of the global state. Numbers count up via {@link CountUp}.
+ *
+ * Each chip is also a **map filter**: clicking it toggles whether that
+ * compartment contributes to the map's heat metric (the count stays visible
+ * either way), so the user can recolour the map by any subset of states.
+ */
+@Component({
+  selector: 'app-world-totals',
+  imports: [CountUp, InfoTip],
+  host: { class: 'card world-totals' },
+  template: `
+    @for (chip of chips; track chip.key) {
+      <button
+        type="button"
+        class="chip {{ chip.key }}"
+        [class.off]="!states()[chip.key]"
+        [attr.aria-pressed]="states()[chip.key]"
+        [infoTip]="hint(chip)"
+        (click)="toggle(chip.key)"
+      >
+        <span>{{ chip.label }}</span>
+        <b [countUp]="value(chip.key)"></b>
+      </button>
+    }
+  `,
+})
+export class WorldTotals {
+  private readonly sim = inject(SimulationService);
+  protected readonly chips = TOTALS_CHIPS;
+  /** Worldwide totals of the displayed frame (live or scrubbed). */
+  protected readonly totals = computed(() => this.sim.totals());
+  /** Which compartments are currently shown on the map. */
+  protected readonly states = this.sim.mapStates;
+
+  protected value(key: CompartmentKey): number | undefined {
+    return this.totals()?.[key];
+  }
+
+  protected toggle(key: CompartmentKey): void {
+    this.sim.toggleMapState(key);
+  }
+
+  protected hint(chip: TotalsChip): string {
+    return this.states()[chip.key]
+      ? `${chip.label}: visibile sulla mappa — clic per nascondere`
+      : `${chip.label}: nascosto dalla mappa — clic per mostrare`;
+  }
+}
 
 /** Descriptor for one parameter slider in the panel. */
 interface Ctrl {
@@ -674,78 +1038,141 @@ interface Ctrl {
   step: number;
   /** Render the value as a percentage when true. */
   pct?: boolean;
+  /** Short explanation shown in the info tooltip. */
+  help: string;
 }
 
 /** Slider definitions, in display order. Ranges mirror the model's valid bounds in `backend/app/models.py`. */
 const CONTROLS: Ctrl[] = [
-  { key: 'r0', label: 'R₀ — trasmissibilità', min: 0, max: 20, step: 0.1 },
-  { key: 'intervention', label: 'Interventi (riduzione contatti)', min: 0, max: 1, step: 0.01, pct: true },
-  { key: 'vaccination_rate', label: 'Vaccinazione / giorno', min: 0, max: 0.2, step: 0.001, pct: true },
-  { key: 'fatality_rate', label: 'Letalità', min: 0, max: 1, step: 0.005, pct: true },
-  { key: 'incubation_days', label: 'Incubazione (giorni)', min: 0.1, max: 30, step: 0.1 },
-  { key: 'infectious_days', label: 'Durata infettiva (giorni)', min: 0.1, max: 60, step: 0.1 },
-  { key: 'mobility', label: 'Mobilità globale', min: 0, max: 5, step: 0.1 },
+  {
+    key: 'r0',
+    label: 'R₀ — trasmissibilità',
+    min: 0,
+    max: 20,
+    step: 0.1,
+    help: 'Numero medio di persone contagiate da un infetto in una popolazione tutta suscettibile.',
+  },
+  {
+    key: 'intervention',
+    label: 'Interventi (riduzione contatti)',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    pct: true,
+    help: 'Riduzione globale dei contatti per misure/lockdown: 0% nessuna, 100% blocco totale.',
+  },
+  {
+    key: 'vaccination_rate',
+    label: 'Vaccinazione / giorno',
+    min: 0,
+    max: 0.2,
+    step: 0.001,
+    pct: true,
+    help: 'Quota di suscettibili vaccinati ogni giorno.',
+  },
+  {
+    key: 'fatality_rate',
+    label: 'Letalità',
+    min: 0,
+    max: 1,
+    step: 0.005,
+    pct: true,
+    help: 'Probabilità che un infetto muoia anziché guarire.',
+  },
+  {
+    key: 'incubation_days',
+    label: 'Incubazione (giorni)',
+    min: 0.1,
+    max: 30,
+    step: 0.1,
+    help: 'Giorni medi tra il contagio e l’inizio della fase infettiva.',
+  },
+  {
+    key: 'infectious_days',
+    label: 'Durata infettiva (giorni)',
+    min: 0.1,
+    max: 60,
+    step: 0.1,
+    help: 'Giorni medi in cui un individuo resta contagioso.',
+  },
+  {
+    key: 'mobility',
+    label: 'Mobilità globale',
+    min: 0,
+    max: 5,
+    step: 0.1,
+    help: 'Moltiplicatore dell’intensità degli spostamenti internazionali (diffusione tra Paesi).',
+  },
 ];
 
 /**
  * Control panel: transport (play/pause/step/reset), speed, preset picker,
- * outbreak size, live parameter sliders, world totals and scenario import/export.
+ * outbreak size, live parameter sliders, leaderboard and scenario import/export.
  *
  * It is a thin view over {@link SimulationService}: every interaction maps to a
  * service call, and all displayed values read from the service's signals.
  */
 @Component({
   selector: 'app-control-panel',
+  imports: [RangeFill, InfoTip],
   template: `
     <div class="panel">
-      <section class="block transport">
-        <button class="btn primary" (click)="toggleRun()">
-          {{ sim.running() ? '⏸ Pausa' : '▶ Avvia' }}
-        </button>
-        <button class="btn" (click)="sim.stepOnce()" [disabled]="sim.running()">⏭ Step</button>
-        <button class="btn danger" (click)="sim.reset()">⟲ Reset</button>
-        <div class="day">Giorno <b>{{ sim.day() }}</b></div>
-      </section>
+      <section class="block panel-header">
+        <div class="ph-top">
+          <button class="btn primary sm" (click)="toggleRun()">
+            {{ sim.running() ? '⏸ Pausa' : '▶ Avvia' }}
+          </button>
+          <button
+            class="btn icon"
+            (click)="sim.stepOnce()"
+            [disabled]="sim.running()"
+            title="Avanza di un giorno"
+            aria-label="Step"
+          >
+            ⏭
+          </button>
+          <button class="btn icon danger" (click)="sim.reset()" title="Reset" aria-label="Reset">
+            ⟲
+          </button>
+          <div class="day">Giorno <b>{{ sim.day() }}</b></div>
+        </div>
 
-      <section class="block timeline">
-        <label class="row">
-          <span>Timeline</span>
-          <span class="val" [class.live]="!sim.viewing()">
-            {{ sim.viewing() ? 'giorno ' + sim.day() : '● LIVE' }}
-          </span>
-        </label>
-        <div class="tl">
+        <div class="ph-line">
+          <span class="ph-ico" title="Timeline">⏱</span>
           <input
             type="range"
             min="0"
-            [max]="maxFrame()"
+            [max]="tlMax()"
             [disabled]="maxFrame() < 1"
-            [value]="sim.viewIndex() ?? maxFrame()"
+            [value]="tlValue()"
+            [rangeFill]="tlValue()"
             (input)="onScrub($event)"
           />
           @if (sim.viewing()) {
-            <button class="btn" (click)="sim.goLive()">● Live</button>
+            <button class="ph-live" (click)="sim.goLive()" title="Torna al presente">● Live</button>
+          } @else {
+            <span class="ph-badge live">● LIVE</span>
           }
+        </div>
+
+        <div class="ph-line">
+          <span class="ph-ico" title="Velocità">⚡</span>
+          <input
+            type="range"
+            min="1"
+            max="30"
+            step="1"
+            [value]="sim.snapshot()?.speed ?? 5"
+            [rangeFill]="sim.snapshot()?.speed ?? 5"
+            [disabled]="sim.viewing()"
+            (input)="onSpeed($event)"
+          />
+          <span class="ph-badge">{{ sim.snapshot()?.speed ?? 5 }}×/s</span>
         </div>
       </section>
 
-      <section class="block">
-        <label class="row">
-          <span>Velocità</span>
-          <span class="val">{{ sim.snapshot()?.speed ?? 5 }}×/s</span>
-        </label>
-        <input
-          type="range"
-          min="1"
-          max="30"
-          step="1"
-          [value]="sim.snapshot()?.speed ?? 5"
-          [disabled]="sim.viewing()"
-          (input)="onSpeed($event)"
-        />
-      </section>
-
-      <section class="block">
+      <div class="panel-body">
+        <section class="block setup">
         <label class="field">
           <span>Preset malattia</span>
           <select [disabled]="sim.viewing()" (change)="onPreset($event)">
@@ -755,26 +1182,29 @@ const CONTROLS: Ctrl[] = [
             }
           </select>
         </label>
-        <label class="field">
+        <label class="field seed">
           <span>Infetti iniziali del focolaio</span>
           <input type="number" min="1" [value]="sim.seedCount()" (input)="onSeedCount($event)" />
         </label>
       </section>
 
       <section class="block params">
-        <h3>Parametri (modificabili in tempo reale)</h3>
+        <h3><span class="sec-ico">⚙</span> Parametri <span class="sec-note">· tempo reale</span></h3>
         @for (c of controls; track c.key) {
           <div class="slider">
-            <label class="row">
-              <span>{{ c.label }}</span>
+            <div class="srow">
+              <span class="slabel"
+                >{{ c.label }}<span class="hint" [infoTip]="c.help" tabindex="0">ⓘ</span></span
+              >
               <span class="val">{{ display(c) }}</span>
-            </label>
+            </div>
             <input
               type="range"
               [min]="c.min"
               [max]="c.max"
               [step]="c.step"
               [value]="sim.params()[c.key]"
+              [rangeFill]="sim.params()[c.key]"
               [disabled]="sim.viewing()"
               (input)="onSlider(c.key, $event)"
             />
@@ -782,25 +1212,14 @@ const CONTROLS: Ctrl[] = [
         }
       </section>
 
-      <section class="block totals">
-        <h3>Popolazione mondiale</h3>
-        <div class="chips">
-          <div class="chip s"><span>Suscettibili</span><b>{{ fmt(totals()?.s) }}</b></div>
-          <div class="chip e"><span>Esposti</span><b>{{ fmt(totals()?.e) }}</b></div>
-          <div class="chip i"><span>Infetti</span><b>{{ fmt(totals()?.i) }}</b></div>
-          <div class="chip r"><span>Guariti</span><b>{{ fmt(totals()?.r) }}</b></div>
-          <div class="chip d"><span>Deceduti</span><b>{{ fmt(totals()?.d) }}</b></div>
-          <div class="chip v"><span>Vaccinati</span><b>{{ fmt(totals()?.v) }}</b></div>
-        </div>
-      </section>
-
-      <section class="block io">
-        <button class="btn" (click)="onExport()">⬇ Esporta scenario</button>
-        <label class="btn file">
-          ⬆ Importa scenario
-          <input type="file" accept="application/json" (change)="onImport($event)" hidden />
-        </label>
-      </section>
+        <section class="block io">
+          <button class="btn" (click)="onExport()">⬇ Esporta scenario</button>
+          <label class="btn file">
+            ⬆ Importa scenario
+            <input type="file" accept="application/json" (change)="onImport($event)" hidden />
+          </label>
+        </section>
+      </div>
     </div>
   `,
 })
@@ -810,10 +1229,13 @@ export class ControlPanel implements OnInit {
   protected readonly controls = CONTROLS;
   /** Disease presets loaded from the backend. */
   protected readonly presets = signal<Preset[]>([]);
-  /** Convenience accessor for the latest worldwide totals. */
-  protected readonly totals = computed(() => this.sim.totals());
   /** Highest scrubbable frame index (0 when there is nothing to scrub yet). */
   protected readonly maxFrame = computed(() => Math.max(0, this.sim.frameCount() - 1));
+  /** Slider max, never 0, so the thumb can sit at the right at LIVE even when
+   *  only the current frame is buffered (e.g. a client connected mid-run). */
+  protected readonly tlMax = computed(() => Math.max(1, this.maxFrame()));
+  /** Slider value: the scrubbed index, or the right end (LIVE). */
+  protected readonly tlValue = computed(() => this.sim.viewIndex() ?? this.tlMax());
 
   /** Load the presets; fall back to an empty list on failure. */
   async ngOnInit(): Promise<void> {
@@ -902,16 +1324,5 @@ export class ControlPanel implements OnInit {
     } finally {
       input.value = '';
     }
-  }
-
-  /**
-   * Format a count for the totals chips (thousands separators, em dash if
-   * undefined).
-   *
-   * @param v The value to format.
-   */
-  protected fmt(v: number | undefined): string {
-    if (v === undefined) return '—';
-    return Math.round(v).toLocaleString('it-IT');
   }
 }

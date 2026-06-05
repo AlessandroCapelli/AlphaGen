@@ -8,7 +8,7 @@ import {
 } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
-import { ControlPanel, EpiChart, WorldMap } from './app/components';
+import { ControlPanel, EpiChart, Leaderboard, WorldMap, WorldTotals } from './app/components';
 import { SimulationService } from './app/simulation.service';
 
 /**
@@ -19,7 +19,7 @@ import { SimulationService } from './app/simulation.service';
  */
 @Component({
   selector: 'app-root',
-  imports: [WorldMap, EpiChart, ControlPanel],
+  imports: [WorldMap, EpiChart, WorldTotals, Leaderboard, ControlPanel],
   template: `
     <div class="app">
       <header>
@@ -30,14 +30,16 @@ import { SimulationService } from './app/simulation.service';
       </header>
 
       <main>
-        <div class="left">
+        <aside class="left">
+          <app-world-totals />
           <div class="card map-card">
             <app-world-map />
           </div>
+          <app-leaderboard />
           <div class="card chart-card">
             <app-epi-chart />
           </div>
-        </div>
+        </aside>
         <aside class="right">
           <app-control-panel />
         </aside>
@@ -48,13 +50,11 @@ import { SimulationService } from './app/simulation.service';
 export class App implements OnInit {
   protected readonly sim = inject(SimulationService);
 
-  /** Open the simulation WebSocket when the app loads. */
   ngOnInit(): void {
     this.sim.connect();
   }
 }
 
-/** Application-wide providers. */
 const appConfig: ApplicationConfig = {
   providers: [provideBrowserGlobalErrorListeners(), provideHttpClient()],
 };

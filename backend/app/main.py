@@ -21,8 +21,15 @@ Client -> server WebSocket commands (JSON):
     {"type": "seed", "iso": "USA", "count": 100}  # start an outbreak
     {"type": "setParams", "params": { ... }}      # live parameter tuning
     {"type": "setSpeed", "speed": 10}             # steps per second
+    {"type": "setCountryIntervention", "iso": "ITA", "value": 0.6}  # per-country lockdown
+    {"type": "getHistory"}                        # request the per-day totals series
 
-Server -> client: {"type": "snapshot", ...Snapshot} (one frame of world state).
+Every simulated day is also persisted incrementally to ``backups/backup.ndjson``
+(see :mod:`app.backup`); the server recovers from it on startup and exposes it as
+a downloadable ``SavedState`` at ``GET /api/backup``.
+
+Server -> client: {"type": "snapshot", ...Snapshot} (one frame of world state),
+or {"type": "history", "points": [...]} in reply to a ``getHistory`` request.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from app import backup
+from app.backup import BackupWriter
 from app.models import CountryMeta, Params, Preset
 from app.simulation import SimulationEngine
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -43,10 +52,9 @@ GEOJSON_FILE = DATA_DIR / "world.geo.json"
 PRESETS_FILE = DATA_DIR / "presets.json"
 FLIGHTS_FILE = DATA_DIR / "flights.json"
 
+BACKUP_FILE = Path(__file__).resolve().parent.parent / "backups" / "backup.ndjson"
 
-# ============================================================
-# Real-time layer
-# ============================================================
+
 class ConnectionManager:
     """Tracks active WebSocket clients and broadcasts snapshots to them."""
 
@@ -134,9 +142,6 @@ async def _handle_command(
         await manager.broadcast_snapshot(engine)
 
 
-# ============================================================
-# Shared singletons (created in the lifespan)
-# ============================================================
 engine: SimulationEngine | None = None
 manager: ConnectionManager | None = None
 
@@ -157,9 +162,19 @@ def get_manager() -> ConnectionManager:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the shared singletons and run the background simulation loop."""
+    """Create the shared singletons, recover any backup and run the sim loop.
+
+    The previous run's incremental backup (if any) is read **before** the engine
+    is built — constructing the engine truncates the backup to start a fresh
+    segment — and then replayed via ``restore`` so a crashed/restarted server
+    resumes the **whole** pre-crash timeline (a reconnecting client replays the
+    entire chart and scrubber, not just the final day).
+    """
     global engine, manager
-    engine = SimulationEngine()
+    recovered = backup.load_saved_state(BACKUP_FILE)
+    engine = SimulationEngine(backup=BackupWriter(BACKUP_FILE))
+    if recovered is not None:
+        engine.restore(recovered)
     manager = ConnectionManager()
     task = asyncio.create_task(sim_loop(engine, manager))
     try:
@@ -168,12 +183,8 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-# ============================================================
-# Application
-# ============================================================
 app = FastAPI(title="AlphaGen Epidemic Simulator", lifespan=lifespan)
 
-# Allow the Angular dev server to call the API and open the WebSocket.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
@@ -182,7 +193,6 @@ app.add_middleware(
 )
 
 
-# -- REST --------------------------------------------------------------
 @app.get("/api/health", tags=["meta"])
 def health() -> dict:
     """Liveness probe used by the frontend and for smoke tests."""
@@ -227,6 +237,19 @@ async def export_scenario(name: str = Query("scenario")) -> dict:
     return get_engine().to_scenario(name)
 
 
+@app.get("/api/backup", tags=["scenarios"])
+async def get_backup() -> JSONResponse:
+    """Return the incremental crash-recovery backup as a ``SavedState``.
+
+    Same shape as the frontend ``exportState``, so the downloaded file loads
+    straight from the UI's *Carica* button. 404 when no backup exists yet.
+    """
+    state = backup.load_saved_state(BACKUP_FILE)
+    if state is None:
+        raise HTTPException(status_code=404, detail="No backup available")
+    return JSONResponse(state)
+
+
 @app.post("/api/scenario", tags=["scenarios"])
 async def import_scenario(data: dict) -> dict:
     """Restore the engine state from a scenario (single live frame).
@@ -241,7 +264,6 @@ async def import_scenario(data: dict) -> dict:
     return {"ok": True, "day": eng.day}
 
 
-# -- real-time stream --------------------------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     """Real-time channel: streams snapshots and accepts control commands."""
@@ -255,6 +277,18 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             except WebSocketDisconnect:
                 break
             except Exception:
+                continue
+            if isinstance(msg, dict) and msg.get("type") == "getHistory":
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "history",
+                            "points": eng.history_points(),
+                            "frames": eng.frames_payload(),
+                        }
+                    )
+                except Exception:
+                    pass
                 continue
             try:
                 await _handle_command(msg, eng, mgr)

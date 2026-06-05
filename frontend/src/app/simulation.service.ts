@@ -4,12 +4,14 @@ import { firstValueFrom } from 'rxjs';
 
 import {
   CountryMeta,
+  CountrySnapshot,
   HistoryPoint,
   Params,
   Preset,
   SavedState,
   Scenario,
   Snapshot,
+  Totals,
 } from './models';
 
 /** Base URL of the backend REST API. */
@@ -18,18 +20,38 @@ const API_BASE = 'http://localhost:8000';
 /** WebSocket endpoint used for the real-time simulation stream. */
 const WS_URL = 'ws://localhost:8000/ws';
 
-/** Maximum number of history points kept in memory for the chart. */
-const HISTORY_LIMIT = 10_000;
-
 /**
- * Maximum number of full snapshots buffered for the timeline scrubber. Kept
- * equal to {@link HISTORY_LIMIT} so the timeline covers the whole run and day 1
- * stays reachable; only runs longer than this start dropping the oldest frames.
+ * The retention limit for the frontend. The chart history and the timeline frame
+ * buffer are both capped here, so they always cover exactly the same span — no
+ * partial or misaligned data. Single source of truth; mirrors the backend `DATA_LIMIT`.
  */
-const FRAME_LIMIT = HISTORY_LIMIT;
+const DATA_LIMIT = 10_000;
 
 /** Default number of initial infectious individuals when seeding an outbreak. */
 const DEFAULT_SEED_COUNT = 100;
+
+/** Compartment keys (S/E/I/R/D/V); used by the map's state filters. */
+export type CompartmentKey = 's' | 'e' | 'i' | 'r' | 'd' | 'v';
+
+/** Human-readable short labels for the compartments, in display order. */
+export const COMPARTMENT_LABELS: readonly { key: CompartmentKey; label: string }[] = [
+  { key: 's', label: 'Susc.' },
+  { key: 'e', label: 'Esp.' },
+  { key: 'i', label: 'Inf.' },
+  { key: 'r', label: 'Guar.' },
+  { key: 'd', label: 'Dec.' },
+  { key: 'v', label: 'Vacc.' },
+];
+
+/** Default map heat metric: active cases (Exposed + Infectious). */
+const DEFAULT_MAP_STATES: Record<CompartmentKey, boolean> = {
+  s: false,
+  e: true,
+  i: true,
+  r: false,
+  d: false,
+  v: false,
+};
 
 /** Parameters used before the first snapshot arrives from the backend. */
 const DEFAULT_PARAMS: Params = {
@@ -41,6 +63,77 @@ const DEFAULT_PARAMS: Params = {
   intervention: 0,
   mobility: 1,
 };
+
+/** Compact columnar timeline frames sent on connect (see backend `frames_payload`). */
+interface ColumnarFrames {
+  iso: string[];
+  name: string[];
+  population: number[];
+  frame: {
+    day: number;
+    speed: number;
+    params: Params;
+    s: number[];
+    e: number[];
+    i: number[];
+    r: number[];
+    d: number[];
+    v: number[];
+    c: number[];
+  }[];
+}
+
+/** Reconstruct full {@link Snapshot} frames from the compact columnar replay. */
+function rebuildFrames(fb: ColumnarFrames): Snapshot[] {
+  const { iso, name, population, frame } = fb;
+  const n = iso.length;
+  const out: Snapshot[] = [];
+  for (const fr of frame) {
+    let ts = 0;
+    let te = 0;
+    let ti = 0;
+    let tr = 0;
+    let td = 0;
+    let tv = 0;
+    const countries = new Array<Snapshot['countries'][number]>(n);
+    for (let k = 0; k < n; k++) {
+      const s = fr.s[k];
+      const e = fr.e[k];
+      const i = fr.i[k];
+      const r = fr.r[k];
+      const d = fr.d[k];
+      const v = fr.v[k];
+      ts += s;
+      te += e;
+      ti += i;
+      tr += r;
+      td += d;
+      tv += v;
+      countries[k] = {
+        iso: iso[k],
+        name: name[k],
+        population: population[k],
+        s,
+        e,
+        i,
+        r,
+        d,
+        v,
+        intervention: fr.c[k],
+      };
+    }
+    out.push({
+      type: 'snapshot',
+      day: fr.day,
+      running: false,
+      speed: fr.speed,
+      params: fr.params,
+      totals: { s: ts, e: te, i: ti, r: tr, d: td, v: tv },
+      countries,
+    });
+  }
+  return out;
+}
 
 /**
  * Single source of truth for the simulation.
@@ -60,7 +153,7 @@ export class SimulationService {
   readonly connected = signal(false);
   /** The most recent frame received from the backend. */
   readonly snapshot = signal<Snapshot | null>(null);
-  /** Time series of worldwide totals, capped at {@link HISTORY_LIMIT}. */
+  /** Time series of worldwide totals, capped at {@link DATA_LIMIT}. */
   readonly history = signal<HistoryPoint[]>([]);
   /** Locally edited parameters (the slider model). */
   readonly params = signal<Params>({ ...DEFAULT_PARAMS });
@@ -75,6 +168,19 @@ export class SimulationService {
   private readonly frameTick = signal(0);
   /** Frame index being viewed, or null to follow the live latest frame. */
   readonly viewIndex = signal<number | null>(null);
+  /** ISO3 of the country whose detail card is open, or null. Shared by the map
+   *  and the leaderboard so either can open/highlight a country. */
+  readonly selectedIso = signal<string | null>(null);
+  /** Which compartments contribute to the map heat metric. Toggled from the
+   *  totals chips so the user can recolour the map by any subset of states. */
+  readonly mapStates = signal<Record<CompartmentKey, boolean>>({ ...DEFAULT_MAP_STATES });
+
+  /** Short label of the active map metric (e.g. "Esp.+Inf."), for the legend. */
+  readonly mapMetricLabel = computed(() => {
+    const m = this.mapStates();
+    const on = COMPARTMENT_LABELS.filter((c) => m[c.key]).map((c) => c.label);
+    return on.length ? on.join('+') : '—';
+  });
 
   /** Whether the user is scrubbing a past frame (not following live). */
   readonly viewing = computed(() => this.viewIndex() !== null);
@@ -89,8 +195,22 @@ export class SimulationService {
   readonly day = computed(() => this.displayed()?.day ?? 0);
   /** Whether the simulation is auto-advancing (always the live state). */
   readonly running = computed(() => this.snapshot()?.running ?? false);
-  /** Worldwide totals of the displayed frame, or null before the first frame. */
-  readonly totals = computed(() => this.displayed()?.totals ?? null);
+  /** Worldwide totals of the displayed frame, or null before the first frame.
+   *  Compartment counts are physical population sizes, so they are clamped to
+   *  ≥ 0 — a defensive guard against any rounding/transient producing a stray
+   *  negative in the totals strip. */
+  readonly totals = computed<Totals | null>(() => {
+    const t = this.displayed()?.totals;
+    if (!t) return null;
+    return {
+      s: Math.max(0, t.s),
+      e: Math.max(0, t.e),
+      i: Math.max(0, t.i),
+      r: Math.max(0, t.r),
+      d: Math.max(0, t.d),
+      v: Math.max(0, t.v),
+    };
+  });
 
   /** Open the WebSocket connection. Idempotent: a no-op if already connected. */
   connect(): void {
@@ -101,12 +221,13 @@ export class SimulationService {
     }
     const ws = new WebSocket(WS_URL);
     this.socket = ws;
-    ws.onopen = () => this.connected.set(true);
+    ws.onopen = () => {
+      this.connected.set(true);
+      this.send({ type: 'getHistory' });
+    };
     ws.onclose = () => {
       this.connected.set(false);
       this.socket = undefined;
-      // Auto-reconnect (e.g. after a backend reload). Keep a single pending
-      // timer so repeated close events can't pile up timers.
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = setTimeout(() => this.connect(), 1500);
     };
@@ -116,11 +237,23 @@ export class SimulationService {
 
   /** Parse an incoming frame, update the snapshot and append to history. */
   private onMessage(ev: MessageEvent): void {
-    const data = JSON.parse(ev.data) as Snapshot;
-    if (data.type !== 'snapshot') return;
+    const msg = JSON.parse(ev.data) as { type?: string };
+    if (msg.type === 'history') {
+      const m = msg as { points?: HistoryPoint[]; frames?: ColumnarFrames };
+      const points = m.points ?? [];
+      if (points.length > this.history().length) this.history.set(points.slice(-DATA_LIMIT));
+      const fb = m.frames;
+      if (fb?.frame && fb.frame.length > this.frames.length) {
+        this.frames = rebuildFrames(fb).slice(-DATA_LIMIT);
+        this.frameCount.set(this.frames.length);
+        this.frameTick.set(this.frameTick() + 1);
+      }
+      return;
+    }
+    if (msg.type !== 'snapshot') return;
+    const data = msg as Snapshot;
     this.snapshot.set(data);
     if (data.day === 0) {
-      // Day 0 means a fresh start/reset: restart the series and the buffer.
       this.history.set([{ day: 0, totals: data.totals }]);
       this.frames = [data];
       this.viewIndex.set(null);
@@ -128,16 +261,20 @@ export class SimulationService {
       const hist = this.history();
       const last = hist[hist.length - 1];
       const point = { day: data.day, totals: data.totals };
-      if (last && last.day === data.day) {
+      if (last && data.day < last.day) {
+        this.history.set([point]);
+        this.frames = [data];
+        this.viewIndex.set(null);
+      } else if (last && last.day === data.day) {
         this.history.set([...hist.slice(0, -1), point]);
         if (this.frames.length > 0) this.frames[this.frames.length - 1] = data;
         else this.frames.push(data);
       } else {
         const next = [...hist, point];
-        if (next.length > HISTORY_LIMIT) next.shift();
+        if (next.length > DATA_LIMIT) next.shift();
         this.history.set(next);
         this.frames.push(data);
-        if (this.frames.length > FRAME_LIMIT) {
+        if (this.frames.length > DATA_LIMIT) {
           this.frames.shift();
           const vi = this.viewIndex();
           if (vi !== null) this.viewIndex.set(Math.max(0, vi - 1));
@@ -152,8 +289,6 @@ export class SimulationService {
   private send(msg: Record<string, unknown>): void {
     this.socket?.send(JSON.stringify(msg));
   }
-
-  // -- commands --------------------------------------------------------
 
   /** Start auto-advancing the simulation. */
   play(): void {
@@ -195,16 +330,70 @@ export class SimulationService {
   }
 
   /**
+   * Toggle whether a compartment contributes to the map heat metric. The last
+   * enabled state can't be turned off (an all-off map reads as "no data"), so
+   * there is always at least one active compartment.
+   *
+   * @param key Compartment to toggle.
+   */
+  toggleMapState(key: CompartmentKey): void {
+    const next = { ...this.mapStates(), [key]: !this.mapStates()[key] };
+    if (Object.values(next).every((on) => !on)) return;
+    this.mapStates.set(next);
+  }
+
+  /**
+   * Sum of the currently-selected compartments for one country — the value the
+   * map heat is computed from (defaults to active cases E + I).
+   *
+   * @param c A per-country snapshot.
+   */
+  mapMetric(c: CountrySnapshot): number {
+    const m = this.mapStates();
+    let v = 0;
+    if (m.s) v += c.s;
+    if (m.e) v += c.e;
+    if (m.i) v += c.i;
+    if (m.r) v += c.r;
+    if (m.d) v += c.d;
+    if (m.v) v += c.v;
+    return v;
+  }
+
+  /**
    * Active cases (E + I) for one country over the most recent
-   * {@link HISTORY_LIMIT} frames (for the detail-card sparkline).
+   * {@link DATA_LIMIT} frames (for the detail-card sparkline).
    */
   seriesFor(iso: string): number[] {
     this.frameTick();
-    const start = Math.max(0, this.frames.length - HISTORY_LIMIT);
+    const start = Math.max(0, this.frames.length - DATA_LIMIT);
     const out: number[] = [];
     for (let k = start; k < this.frames.length; k++) {
       const c = this.frames[k].countries.find((x) => x.iso === iso);
       out.push(c ? c.e + c.i : 0);
+    }
+    return out;
+  }
+
+  /**
+   * Active-case (E + I) mini-series for several countries at once, sampled to at
+   * most `points` values. One pass over a strided subset of the frame buffer, so
+   * it stays cheap even with many leaderboard rows refreshing every frame.
+   *
+   * @param isos Countries to extract (typically the leaderboard's top N).
+   * @param points Target number of sampled points per series.
+   */
+  activeSeries(isos: string[], points = 28): Map<string, number[]> {
+    this.frameTick();
+    const want = new Set(isos);
+    const out = new Map<string, number[]>(isos.map((iso) => [iso, []]));
+    const n = this.frames.length;
+    if (n === 0) return out;
+    const step = Math.max(1, Math.ceil(n / points));
+    for (let k = (n - 1) % step; k < n; k += step) {
+      for (const c of this.frames[k].countries) {
+        if (want.has(c.iso)) out.get(c.iso)!.push(c.e + c.i);
+      }
     }
     return out;
   }
@@ -260,8 +449,6 @@ export class SimulationService {
     this.send({ type: 'setParams', params });
   }
 
-  // -- REST ------------------------------------------------------------
-
   /** Fetch the available disease presets. */
   getPresets(): Promise<Preset[]> {
     return firstValueFrom(this.http.get<Preset[]>(`${API_BASE}/api/presets`));
@@ -282,14 +469,12 @@ export class SimulationService {
     return firstValueFrom(this.http.get(`${API_BASE}/api/flights`));
   }
 
-  // -- save / restore (complete state) --------------------------------
-
   /**
-   * Export the COMPLETE state: the whole frame buffer. The chart history, the
-   * current live state and the map replay are all derivable from it.
+   * Export the COMPLETE state: the frame buffer (timeline) plus the chart
+   * series. The series is stored explicitly so a client connected mid-run still round-trips its full chart history.
    */
   exportState(): SavedState {
-    return { version: 3, frames: this.frames };
+    return { version: 4, frames: this.frames, history: this.history() };
   }
 
   /**
@@ -297,15 +482,19 @@ export class SimulationService {
    * buffer, the chart history and the displayed snapshot locally, then sync the
    * backend engine to the last frame so play/step continue from there.
    *
-   * @param data The saved state (frame buffer).
+   * @param data The saved state.
    */
   async importState(data: SavedState): Promise<void> {
-    if (!data || data.version !== 3 || !Array.isArray(data.frames)) {
-      throw new Error('Formato di stato non riconosciuto (atteso version 3).');
+    if (!data || data.version !== 4 || !Array.isArray(data.frames)) {
+      throw new Error('Formato di stato non riconosciuto.');
     }
-    const frames = data.frames.slice(-FRAME_LIMIT);
+    const frames = data.frames.slice(-DATA_LIMIT);
     this.frames = frames;
-    this.history.set(frames.map((f) => ({ day: f.day, totals: f.totals })));
+    const hist =
+      Array.isArray(data.history) && data.history.length
+        ? data.history.slice(-DATA_LIMIT)
+        : frames.map((f) => ({ day: f.day, totals: f.totals }));
+    this.history.set(hist);
     this.frameCount.set(frames.length);
     this.frameTick.set(this.frameTick() + 1);
     this.viewIndex.set(null);
@@ -316,11 +505,9 @@ export class SimulationService {
     }
 
     const last = frames[frames.length - 1];
-    // Show the restored frame paused.
     this.snapshot.set({ ...last, running: false });
     this.params.set({ ...last.params });
 
-    // Sync the backend engine so a subsequent play/step continues from here.
     const scenario: Scenario = {
       name: 'import',
       day: last.day,

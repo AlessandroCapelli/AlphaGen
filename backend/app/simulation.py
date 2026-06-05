@@ -17,14 +17,13 @@ import json
 from pathlib import Path
 
 import numpy as np
+from app.backup import BackupWriter
 from app.models import CountryMeta, CountrySnapshot, Params, Snapshot, Totals
 
 DATA_DIR = Path(__file__).parent / "data"
 COUNTRIES_FILE = DATA_DIR / "countries.json"
 FLIGHTS_FILE = DATA_DIR / "flights.json"
 
-
-# -- data loading ------------------------------------------------------
 def load_countries() -> list[CountryMeta]:
     """Read ``countries.json`` and parse it into :class:`CountryMeta` records.
 
@@ -77,7 +76,6 @@ def build_coupling(countries: list[CountryMeta]) -> np.ndarray:
     return w
 
 
-# -- numerical model ---------------------------------------------------
 class SeirModel:
     """Vectorised SEIRD+V metapopulation model.
 
@@ -164,28 +162,20 @@ class SeirModel:
         sigma = 1.0 / p.incubation_days
         gamma = 1.0 / p.infectious_days
 
-        # Active infectious prevalence per country (guard against empty pop).
         safe_N = np.where(self.N > 0, self.N, 1.0)
         prevalence = self.I / safe_N
 
-        # Per-country intervention dampens both local spread and travel: a
-        # locked-down country transmits/exports less, and imports less.
         open_frac = 1.0 - self.C
         eff_prev = prevalence * open_frac
         local_force = beta_eff * eff_prev
         imported_force = p.mobility * open_frac * (self.W @ eff_prev)
         lam = local_force + imported_force
 
-        # Cap every transition to the people actually available in the source
-        # compartment. This keeps the model conservative (no negative
-        # compartments, no double-counting into R/D) even when a rate exceeds 1,
-        # e.g. with very short incubation/infectious periods set via the API.
         new_e = np.minimum(lam * self.S, self.S)
         new_i = np.minimum(sigma * self.E, self.E)
         leaving_i = np.minimum(gamma * self.I, self.I)
         new_d = p.fatality_rate * leaving_i
         new_r = leaving_i - new_d
-        # Vaccinate susceptibles, but never more than remain after new exposures.
         new_v = np.minimum(p.vaccination_rate * self.S, self.S - new_e)
         new_v = np.maximum(new_v, 0.0)
 
@@ -196,18 +186,44 @@ class SeirModel:
         self.D += new_d
         self.V += new_v
 
-        # Clamp the flow compartments against tiny negative rounding errors.
         np.clip(self.S, 0.0, None, out=self.S)
         np.clip(self.E, 0.0, None, out=self.E)
         np.clip(self.I, 0.0, None, out=self.I)
 
+DATA_LIMIT = 10_000
 
-# -- stateful runner ---------------------------------------------------
+def _columnar_frame(f: dict) -> dict:
+    """Serialise one ``frames_log`` entry to the compact columnar wire form.
+
+    Compartment counts are rounded to whole people and per-country intervention
+    to 3 decimals to keep the payload small. Shared by :meth:`frames_payload`
+    (replay on connect) and the on-disk backup, so both stay byte-identical.
+    """
+    return {
+        "day": f["day"],
+        "speed": f["speed"],
+        "params": f["params"],
+        "s": np.rint(f["S"]).astype(int).tolist(),
+        "e": np.rint(f["E"]).astype(int).tolist(),
+        "i": np.rint(f["I"]).astype(int).tolist(),
+        "r": np.rint(f["R"]).astype(int).tolist(),
+        "d": np.rint(f["D"]).astype(int).tolist(),
+        "v": np.rint(f["V"]).astype(int).tolist(),
+        "c": [round(x, 3) for x in f["C"].tolist()],
+    }
+
+
 class SimulationEngine:
     """Owns the model state and exposes high-level control + serialisation."""
 
-    def __init__(self) -> None:
-        """Load country data, build the coupling matrix and the SEIR model."""
+    def __init__(self, backup: BackupWriter | None = None) -> None:
+        """Load country data, build the coupling matrix and the SEIR model.
+
+        Args:
+            backup: Optional :class:`~app.backup.BackupWriter`. When given, every
+                recorded day is also appended to disk for crash recovery (the
+                server wires one in; tests and in-process use leave it ``None``).
+        """
         self.countries = load_countries()
         self.index = {c.iso: i for i, c in enumerate(self.countries)}
         populations = np.array([c.population for c in self.countries], dtype=float)
@@ -217,14 +233,95 @@ class SimulationEngine:
         self.params = Params()
         self.day = 0
         self.running = False
-        self.speed = 5.0  # simulation steps per second when running
+        self.speed = 5.0
+        self.history: list[dict] = []
+        self.frames_log: list[dict] = []
+        self._backup = backup
+        if self._backup is not None:
+            self._backup.reset(self._backup_header())
+        self._record()
 
-    # -- control ---------------------------------------------------------
+    def _backup_header(self) -> dict:
+        """Country metadata (model order) written once at the top of a backup."""
+        return {
+            "iso": [c.iso for c in self.countries],
+            "name": [c.name for c in self.countries],
+            "population": [float(self.model.N[i]) for i in range(self.model.n)],
+        }
+
+    def _record(self) -> None:
+        """Record the current day in both replay buffers.
+
+        Updates the entry for the current day in place if it already exists (so a
+        seed/intervention applied without stepping refreshes that day), otherwise
+        appends a new one and trims to the caps.
+        """
+        m = self.model
+        totals = {
+            "s": float(m.S.sum()),
+            "e": float(m.E.sum()),
+            "i": float(m.I.sum()),
+            "r": float(m.R.sum()),
+            "d": float(m.D.sum()),
+            "v": float(m.V.sum()),
+        }
+        if self.history and self.history[-1]["day"] == self.day:
+            self.history[-1]["totals"] = totals
+        else:
+            self.history.append({"day": self.day, "totals": totals})
+            if len(self.history) > DATA_LIMIT:
+                del self.history[0]
+
+        frame = {
+            "day": self.day,
+            "speed": self.speed,
+            "params": self.params.model_dump(),
+            "S": m.S.copy(),
+            "E": m.E.copy(),
+            "I": m.I.copy(),
+            "R": m.R.copy(),
+            "D": m.D.copy(),
+            "V": m.V.copy(),
+            "C": m.C.copy(),
+        }
+        if self.frames_log and self.frames_log[-1]["day"] == self.day:
+            self.frames_log[-1] = frame
+        else:
+            self.frames_log.append(frame)
+            if len(self.frames_log) > DATA_LIMIT:
+                del self.frames_log[0]
+
+        if self._backup is not None:
+            self._backup.append_day(_columnar_frame(frame))
+
+    def history_points(self) -> list[dict]:
+        """The recorded per-day totals series (for replay on connect)."""
+        return self.history
+
+    def frames_payload(self) -> dict:
+        """Full timeline frames in a compact columnar form (for replay on connect).
+
+        Country metadata (iso/name/population, in model order) is sent once; each
+        frame carries only the per-country compartments. Compartment counts are
+        rounded to whole people to keep the payload small.
+        """
+        return {
+            "iso": [c.iso for c in self.countries],
+            "name": [c.name for c in self.countries],
+            "population": [float(self.model.N[i]) for i in range(self.model.n)],
+            "frame": [_columnar_frame(f) for f in self.frames_log],
+        }
+
     def reset(self) -> None:
         """Clear all compartments and the day counter (everyone susceptible)."""
         self.model.reset()
         self.day = 0
         self.running = False
+        self.history.clear()
+        self.frames_log.clear()
+        if self._backup is not None:
+            self._backup.reset(self._backup_header())
+        self._record()
 
     def seed(self, iso: str, count: float = 100.0) -> None:
         """Start an outbreak of ``count`` infectious people in country ``iso``.
@@ -238,6 +335,7 @@ class SimulationEngine:
         idx = self.index.get(iso)
         if idx is not None:
             self.model.seed(idx, count)
+            self._record()
 
     def set_country_intervention(self, iso: str, value: float) -> None:
         """Set the intervention level (0..1) for a single country.
@@ -251,15 +349,14 @@ class SimulationEngine:
         idx = self.index.get(iso)
         if idx is not None:
             self.model.C[idx] = max(0.0, min(1.0, value))
+            self._record()
 
-    # -- scenario save/restore (full live state) ------------------------
     def to_scenario(self, name: str = "scenario") -> dict:
         """Serialise the full live state so it can be restored exactly.
 
-        Captures the day, parameters, speed and the compartment counts of every
-        affected country. Only fully-susceptible, intervention-free countries are
-        omitted (they are rebuilt as S = N on restore), keeping the payload small
-        while still preserving sub-unit nascent outbreaks seeded via travel.
+        Captures the day, parameters, speed and the compartment counts of **every**
+        country, so the round-trip is complete and lossless (no country is rebuilt
+        from defaults on restore).
 
         Args:
             name: Label stored alongside the scenario.
@@ -280,7 +377,6 @@ class SimulationEngine:
                 "intervention": float(m.C[i]),
             }
             for i, c in enumerate(self.countries)
-            if (m.E[i] + m.I[i] + m.R[i] + m.D[i] + m.V[i]) > 1e-6 or m.C[i] > 0
         ]
         return {
             "name": name,
@@ -317,6 +413,76 @@ class SimulationEngine:
             m.D[idx] = max(0.0, float(rec.get("d", 0.0)))
             m.V[idx] = max(0.0, float(rec.get("v", 0.0)))
             m.C[idx] = max(0.0, min(1.0, float(rec.get("intervention", 0.0))))
+        self.history.clear()
+        self.frames_log.clear()
+        if self._backup is not None:
+            self._backup.reset(self._backup_header())
+        self._record()
+
+    def restore(self, state: dict) -> None:
+        """Restore the **full** live state *and* replay timeline from a SavedState.
+
+        Unlike :meth:`apply_scenario` (which restores only a single live frame),
+        this rebuilds the entire ``history`` + ``frames_log`` so a client
+        reconnecting after a crash replays the whole pre-crash run (chart and
+        scrubber), not just the final day. Used by the startup recovery path.
+
+        Args:
+            state: A ``SavedState`` dict as produced by
+                :func:`app.backup.load_saved_state` — ``frames`` is a list of
+                snapshot-shaped dicts, oldest first. Empty/invalid input is a
+                no-op. Frames are capped to the most recent :data:`DATA_LIMIT`.
+        """
+        frames = state.get("frames") if isinstance(state, dict) else None
+        if not frames:
+            return
+        frames = frames[-DATA_LIMIT:]
+        n = self.model.n
+        rebuilt_frames: list[dict] = []
+        rebuilt_history: list[dict] = []
+        for fr in frames:
+            arrays = {c: np.zeros(n) for c in "SEIRDVC"}
+            for rec in fr.get("countries", []):
+                idx = self.index.get(rec.get("iso", ""))
+                if idx is None:
+                    continue
+                arrays["S"][idx] = max(0.0, float(rec.get("s", 0.0)))
+                arrays["E"][idx] = max(0.0, float(rec.get("e", 0.0)))
+                arrays["I"][idx] = max(0.0, float(rec.get("i", 0.0)))
+                arrays["R"][idx] = max(0.0, float(rec.get("r", 0.0)))
+                arrays["D"][idx] = max(0.0, float(rec.get("d", 0.0)))
+                arrays["V"][idx] = max(0.0, float(rec.get("v", 0.0)))
+                arrays["C"][idx] = max(
+                    0.0, min(1.0, float(rec.get("intervention", 0.0)))
+                )
+            params = Params(**fr.get("params", {})).model_dump()
+            speed = max(0.1, min(60.0, float(fr.get("speed", 5.0))))
+            day = int(fr.get("day", 0))
+            rebuilt_frames.append(
+                {"day": day, "speed": speed, "params": params, **arrays}
+            )
+            rebuilt_history.append(
+                {
+                    "day": day,
+                    "totals": {k.lower(): float(arrays[k].sum()) for k in "SEIRDV"},
+                }
+            )
+
+        last = rebuilt_frames[-1]
+        m = self.model
+        m.S, m.E, m.I = last["S"].copy(), last["E"].copy(), last["I"].copy()
+        m.R, m.D, m.V = last["R"].copy(), last["D"].copy(), last["V"].copy()
+        m.C = last["C"].copy()
+        self.day = last["day"]
+        self.params = Params(**last["params"])
+        self.speed = last["speed"]
+        self.running = False
+        self.history = rebuilt_history
+        self.frames_log = rebuilt_frames
+        if self._backup is not None:
+            self._backup.reset(self._backup_header())
+            for f in self.frames_log:
+                self._backup.append_day(_columnar_frame(f))
 
     def set_params(self, params: Params) -> None:
         """Replace the active parameters (applied on the next step)."""
@@ -330,8 +496,8 @@ class SimulationEngine:
         """Advance the model by one day and increment the day counter."""
         self.model.step(self.params)
         self.day += 1
+        self._record()
 
-    # -- output ----------------------------------------------------------
     def snapshot(self) -> Snapshot:
         """Build a :class:`~app.models.Snapshot` of the current world state."""
         m = self.model
