@@ -2,6 +2,8 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
+import { API_BASE, RECONNECT_MS, WS_URL } from './config';
+import { ConfigService } from './config.service';
 import {
   CountryMeta,
   CountrySnapshot,
@@ -13,22 +15,6 @@ import {
   Snapshot,
   Totals,
 } from './models';
-
-/** Base URL of the backend REST API. */
-const API_BASE = 'http://localhost:8000';
-
-/** WebSocket endpoint used for the real-time simulation stream. */
-const WS_URL = 'ws://localhost:8000/ws';
-
-/**
- * The retention limit for the frontend. The chart history and the timeline frame
- * buffer are both capped here, so they always cover exactly the same span — no
- * partial or misaligned data. Single source of truth; mirrors the backend `DATA_LIMIT`.
- */
-const DATA_LIMIT = 10_000;
-
-/** Default number of initial infectious individuals when seeding an outbreak. */
-const DEFAULT_SEED_COUNT = 100;
 
 /** Compartment keys (S/E/I/R/D/V); used by the map's state filters. */
 export type CompartmentKey = 's' | 'e' | 'i' | 'r' | 'd' | 'v';
@@ -42,27 +28,6 @@ export const COMPARTMENT_LABELS: readonly { key: CompartmentKey; label: string }
   { key: 'd', label: 'Dec.' },
   { key: 'v', label: 'Vacc.' },
 ];
-
-/** Default map heat metric: active cases (Exposed + Infectious). */
-const DEFAULT_MAP_STATES: Record<CompartmentKey, boolean> = {
-  s: false,
-  e: true,
-  i: true,
-  r: false,
-  d: false,
-  v: false,
-};
-
-/** Parameters used before the first snapshot arrives from the backend. */
-const DEFAULT_PARAMS: Params = {
-  r0: 2.5,
-  incubation_days: 5,
-  infectious_days: 7,
-  fatality_rate: 0.01,
-  vaccination_rate: 0,
-  intervention: 0,
-  mobility: 1,
-};
 
 /** Compact columnar timeline frames sent on connect (see backend `frames_payload`). */
 interface ColumnarFrames {
@@ -146,19 +111,23 @@ function rebuildFrames(fb: ColumnarFrames): Snapshot[] {
 @Injectable({ providedIn: 'root' })
 export class SimulationService {
   private readonly http = inject(HttpClient);
+  private readonly cfg = inject(ConfigService);
   private socket?: WebSocket;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+
+  /** Retention cap for both replay buffers (single config source). */
+  private readonly dataLimit = this.cfg.dataLimit;
 
   /** Whether the WebSocket is currently open. */
   readonly connected = signal(false);
   /** The most recent frame received from the backend. */
   readonly snapshot = signal<Snapshot | null>(null);
-  /** Time series of worldwide totals, capped at {@link DATA_LIMIT}. */
+  /** Time series of worldwide totals, capped at {@link dataLimit}. */
   readonly history = signal<HistoryPoint[]>([]);
-  /** Locally edited parameters (the slider model). */
-  readonly params = signal<Params>({ ...DEFAULT_PARAMS });
+  /** Locally edited parameters (the slider model), seeded from the config defaults. */
+  readonly params = signal<Params>(this.cfg.defaultParams);
   /** Number of infectious individuals injected when a country is clicked. */
-  readonly seedCount = signal(DEFAULT_SEED_COUNT);
+  readonly seedCount = signal(this.cfg.seedDefault);
   /** Ring buffer of full snapshots, used by the timeline scrubber. */
   private frames: Snapshot[] = [];
   /** Number of buffered frames (drives the scrubber range). */
@@ -173,7 +142,9 @@ export class SimulationService {
   readonly selectedIso = signal<string | null>(null);
   /** Which compartments contribute to the map heat metric. Toggled from the
    *  totals chips so the user can recolour the map by any subset of states. */
-  readonly mapStates = signal<Record<CompartmentKey, boolean>>({ ...DEFAULT_MAP_STATES });
+  readonly mapStates = signal<Record<CompartmentKey, boolean>>(
+    this.cfg.mapDefaultStates<CompartmentKey>(),
+  );
 
   /** Short label of the active map metric (e.g. "Esp.+Inf."), for the legend. */
   readonly mapMetricLabel = computed(() => {
@@ -229,7 +200,7 @@ export class SimulationService {
       this.connected.set(false);
       this.socket = undefined;
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = setTimeout(() => this.connect(), 1500);
+      this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => this.onMessage(ev);
@@ -241,10 +212,10 @@ export class SimulationService {
     if (msg.type === 'history') {
       const m = msg as { points?: HistoryPoint[]; frames?: ColumnarFrames };
       const points = m.points ?? [];
-      if (points.length > this.history().length) this.history.set(points.slice(-DATA_LIMIT));
+      if (points.length > this.history().length) this.history.set(points.slice(-this.dataLimit));
       const fb = m.frames;
       if (fb?.frame && fb.frame.length > this.frames.length) {
-        this.frames = rebuildFrames(fb).slice(-DATA_LIMIT);
+        this.frames = rebuildFrames(fb).slice(-this.dataLimit);
         this.frameCount.set(this.frames.length);
         this.frameTick.set(this.frameTick() + 1);
       }
@@ -271,10 +242,10 @@ export class SimulationService {
         else this.frames.push(data);
       } else {
         const next = [...hist, point];
-        if (next.length > DATA_LIMIT) next.shift();
+        if (next.length > this.dataLimit) next.shift();
         this.history.set(next);
         this.frames.push(data);
-        if (this.frames.length > DATA_LIMIT) {
+        if (this.frames.length > this.dataLimit) {
           this.frames.shift();
           const vi = this.viewIndex();
           if (vi !== null) this.viewIndex.set(Math.max(0, vi - 1));
@@ -362,11 +333,11 @@ export class SimulationService {
 
   /**
    * Active cases (E + I) for one country over the most recent
-   * {@link DATA_LIMIT} frames (for the detail-card sparkline).
+   * {@link dataLimit} frames (for the detail-card sparkline).
    */
   seriesFor(iso: string): number[] {
     this.frameTick();
-    const start = Math.max(0, this.frames.length - DATA_LIMIT);
+    const start = Math.max(0, this.frames.length - this.dataLimit);
     const out: number[] = [];
     for (let k = start; k < this.frames.length; k++) {
       const c = this.frames[k].countries.find((x) => x.iso === iso);
@@ -474,7 +445,7 @@ export class SimulationService {
    * series. The series is stored explicitly so a client connected mid-run still round-trips its full chart history.
    */
   exportState(): SavedState {
-    return { version: 4, frames: this.frames, history: this.history() };
+    return { version: this.cfg.saveVersion, frames: this.frames, history: this.history() };
   }
 
   /**
@@ -485,14 +456,14 @@ export class SimulationService {
    * @param data The saved state.
    */
   async importState(data: SavedState): Promise<void> {
-    if (!data || data.version !== 4 || !Array.isArray(data.frames)) {
+    if (!data || data.version !== this.cfg.saveVersion || !Array.isArray(data.frames)) {
       throw new Error('Formato di stato non riconosciuto.');
     }
-    const frames = data.frames.slice(-DATA_LIMIT);
+    const frames = data.frames.slice(-this.dataLimit);
     this.frames = frames;
     const hist =
       Array.isArray(data.history) && data.history.length
-        ? data.history.slice(-DATA_LIMIT)
+        ? data.history.slice(-this.dataLimit)
         : frames.map((f) => ({ day: f.day, totals: f.totals }));
     this.history.set(hist);
     this.frameCount.set(frames.length);

@@ -1,0 +1,91 @@
+{
+	"saveVersion": 4,
+	"dataLimit": 10000,
+	"seed": { "default": 100, "min": 1 },
+	"speed": {
+		"default": 5,
+		"min": 0.1,
+		"max": 60,
+		"uiMin": 1,
+		"uiMax": 30,
+		"uiStep": 1
+	},
+	"lockdown": { "min": 0, "max": 1, "step": 0.05 },
+	"params": [
+		{
+			"key": "r0",
+			"default": 2.5,
+			"min": 0,
+			"max": 20,
+			"step": 0.1,
+			"percent": false,
+			"description": "Basic reproduction number (R0)"
+		},
+		{
+			"key": "incubation_days",
+			"default": 5,
+			"min": 0.1,
+			"max": 30,
+			"step": 0.1,
+			"percent": false,
+			"description": "Mean latency of the Exposed phase (E->I), in days"
+		},
+		{
+			"key": "infectious_days",
+			"default": 7,
+			"min": 0.1,
+			"max": 60,
+			"step": 0.1,
+			"percent": false,
+			"description": "Mean duration of the Infectious phase (I->R/D), in days"
+		},
+		{
+			"key": "fatality_rate",
+			"default": 0.01,
+			"min": 0,
+			"max": 1,
+			"step": 0.005,
+			"percent": true,
+			"description": "Fraction of infectious individuals who die instead of recovering"
+		},
+		{
+			"key": "vaccination_rate",
+			"default": 0,
+			"min": 0,
+			"max": 0.2,
+			"step": 0.001,
+			"percent": true,
+			"description": "Daily fraction of susceptibles moved to the Vaccinated compartment"
+		},
+		{
+			"key": "intervention",
+			"default": 0,
+			"min": 0,
+			"max": 1,
+			"step": 0.01,
+			"percent": true,
+			"description": "Contact reduction (lockdown/distancing) that lowers the effective beta"
+		},
+		{
+			"key": "mobility",
+			"default": 1,
+			"min": 0,
+			"max": 5,
+			"step": 0.1,
+			"percent": false,
+			"description": "Global multiplier applied to inter-country travel coupling"
+		}
+	],
+	"mapDefaultStates": {
+		"s": false,
+		"e": true,
+		"i": true,
+		"r": false,
+		"d": false,
+		"v": false
+	},
+	"server": {
+		"port": 8000,
+		"corsOrigins": ["http://localhost:4200", "http://127.0.0.1:4200"]
+	}
+}

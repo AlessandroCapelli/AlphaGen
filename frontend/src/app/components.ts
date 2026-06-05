@@ -16,6 +16,8 @@ import {
 import * as echarts from 'echarts';
 import * as L from 'leaflet';
 
+import { PARAM_UI } from './config';
+import { ConfigService, ParamControl } from './config.service';
 import { CountrySnapshot, Params, Preset, SavedState } from './models';
 import { CompartmentKey, SimulationService } from './simulation.service';
 
@@ -137,9 +139,9 @@ interface CountryDetail {
             </label>
             <input
               type="range"
-              min="0"
-              max="1"
-              step="0.05"
+              [min]="lockdown.min"
+              [max]="lockdown.max"
+              [step]="lockdown.step"
               [value]="d.intervention"
               [style.background]="lockFill(d.intervention)"
               [disabled]="viewing()"
@@ -156,6 +158,8 @@ interface CountryDetail {
 })
 export class WorldMap implements AfterViewInit, OnDestroy {
   private readonly sim = inject(SimulationService);
+  /** Per-country lockdown slider spec (min/max/step) from the config. */
+  protected readonly lockdown = inject(ConfigService).lockdown;
   private readonly mapEl = viewChild.required<ElementRef<HTMLDivElement>>('mapEl');
 
   /** The Leaflet map instance (created in {@link ngAfterViewInit}). */
@@ -1024,87 +1028,6 @@ export class WorldTotals {
   }
 }
 
-/** Descriptor for one parameter slider in the panel. */
-interface Ctrl {
-  /** Parameter key driven by the slider. */
-  key: keyof Params;
-  /** Visible label. */
-  label: string;
-  /** Slider minimum. */
-  min: number;
-  /** Slider maximum. */
-  max: number;
-  /** Slider step. */
-  step: number;
-  /** Render the value as a percentage when true. */
-  pct?: boolean;
-  /** Short explanation shown in the info tooltip. */
-  help: string;
-}
-
-/** Slider definitions, in display order. Ranges mirror the model's valid bounds in `backend/app/models.py`. */
-const CONTROLS: Ctrl[] = [
-  {
-    key: 'r0',
-    label: 'R₀ — trasmissibilità',
-    min: 0,
-    max: 20,
-    step: 0.1,
-    help: 'Numero medio di persone contagiate da un infetto in una popolazione tutta suscettibile.',
-  },
-  {
-    key: 'intervention',
-    label: 'Interventi (riduzione contatti)',
-    min: 0,
-    max: 1,
-    step: 0.01,
-    pct: true,
-    help: 'Riduzione globale dei contatti per misure/lockdown: 0% nessuna, 100% blocco totale.',
-  },
-  {
-    key: 'vaccination_rate',
-    label: 'Vaccinazione / giorno',
-    min: 0,
-    max: 0.2,
-    step: 0.001,
-    pct: true,
-    help: 'Quota di suscettibili vaccinati ogni giorno.',
-  },
-  {
-    key: 'fatality_rate',
-    label: 'Letalità',
-    min: 0,
-    max: 1,
-    step: 0.005,
-    pct: true,
-    help: 'Probabilità che un infetto muoia anziché guarire.',
-  },
-  {
-    key: 'incubation_days',
-    label: 'Incubazione (giorni)',
-    min: 0.1,
-    max: 30,
-    step: 0.1,
-    help: 'Giorni medi tra il contagio e l’inizio della fase infettiva.',
-  },
-  {
-    key: 'infectious_days',
-    label: 'Durata infettiva (giorni)',
-    min: 0.1,
-    max: 60,
-    step: 0.1,
-    help: 'Giorni medi in cui un individuo resta contagioso.',
-  },
-  {
-    key: 'mobility',
-    label: 'Mobilità globale',
-    min: 0,
-    max: 5,
-    step: 0.1,
-    help: 'Moltiplicatore dell’intensità degli spostamenti internazionali (diffusione tra Paesi).',
-  },
-];
-
 /**
  * Control panel: transport (play/pause/step/reset), speed, preset picker,
  * outbreak size, live parameter sliders, leaderboard and scenario import/export.
@@ -1159,15 +1082,15 @@ const CONTROLS: Ctrl[] = [
           <span class="ph-ico" title="Velocità">⚡</span>
           <input
             type="range"
-            min="1"
-            max="30"
-            step="1"
-            [value]="sim.snapshot()?.speed ?? 5"
-            [rangeFill]="sim.snapshot()?.speed ?? 5"
+            [min]="speed.uiMin"
+            [max]="speed.uiMax"
+            [step]="speed.uiStep"
+            [value]="sim.snapshot()?.speed ?? speed.default"
+            [rangeFill]="sim.snapshot()?.speed ?? speed.default"
             [disabled]="sim.viewing()"
             (input)="onSpeed($event)"
           />
-          <span class="ph-badge">{{ sim.snapshot()?.speed ?? 5 }}×/s</span>
+          <span class="ph-badge">{{ sim.snapshot()?.speed ?? speed.default }}×/s</span>
         </div>
       </section>
 
@@ -1184,7 +1107,12 @@ const CONTROLS: Ctrl[] = [
         </label>
         <label class="field seed">
           <span>Infetti iniziali del focolaio</span>
-          <input type="number" min="1" [value]="sim.seedCount()" (input)="onSeedCount($event)" />
+          <input
+            type="number"
+            [min]="seedMin"
+            [value]="sim.seedCount()"
+            (input)="onSeedCount($event)"
+          />
         </label>
       </section>
 
@@ -1225,8 +1153,13 @@ const CONTROLS: Ctrl[] = [
 })
 export class ControlPanel implements OnInit {
   protected readonly sim = inject(SimulationService);
-  /** Slider descriptors rendered by the template. */
-  protected readonly controls = CONTROLS;
+  private readonly cfg = inject(ConfigService);
+  /** Slider descriptors: frontend UI copy/order × numeric spec from /api/config. */
+  protected readonly controls = this.cfg.paramControls(PARAM_UI);
+  /** Auto-advance speed spec (slider bounds + default) from the config. */
+  protected readonly speed = this.cfg.speed;
+  /** Minimum outbreak size accepted by the seed input. */
+  protected readonly seedMin = this.cfg.seedMin;
   /** Disease presets loaded from the backend. */
   protected readonly presets = signal<Preset[]>([]);
   /** Highest scrubbable frame index (0 when there is nothing to scrub yet). */
@@ -1251,7 +1184,7 @@ export class ControlPanel implements OnInit {
    *
    * @param c The control whose current value should be shown.
    */
-  protected display(c: Ctrl): string {
+  protected display(c: ParamControl): string {
     const v = this.sim.params()[c.key];
     return c.pct ? `${(v * 100).toFixed(2)}%` : `${v}`;
   }
@@ -1280,7 +1213,7 @@ export class ControlPanel implements OnInit {
   /** Handle the outbreak-size input change. */
   protected onSeedCount(event: Event): void {
     const v = parseInt((event.target as HTMLInputElement).value, 10);
-    this.sim.seedCount.set(Number.isFinite(v) && v > 0 ? v : 1);
+    this.sim.seedCount.set(Number.isFinite(v) && v >= this.seedMin ? v : this.seedMin);
   }
 
   /** Apply the parameters of the selected preset. */

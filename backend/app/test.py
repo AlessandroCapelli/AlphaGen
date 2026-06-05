@@ -34,6 +34,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app import backup as backup_mod  # noqa: E402
+from app import config as app_config  # noqa: E402
 from app.backup import BackupWriter  # noqa: E402
 from app.models import CountryMeta, Params, Preset, Snapshot  # noqa: E402
 from app.simulation import (  # noqa: E402
@@ -44,11 +45,13 @@ from app.simulation import (  # noqa: E402
 )
 
 DATA = BACKEND_DIR / "app" / "data"
+N_COUNTRIES = len(load_countries())
+SAVE_VERSION = app_config.SAVE_VERSION
 COMPARTMENTS = "seirdv"
 
 
 def check_snapshot(s: dict, tol: float = 50.0) -> float:
-    """Assert conservation, totals==sum, no negatives, shape and 245 unique isos.
+    """Assert conservation, totals==sum, no negatives, shape and N_COUNTRIES unique isos.
     Returns the worst per-country conservation drift seen."""
     for key in ("day", "running", "speed", "params", "totals", "countries"):
         assert key in s, f"snapshot missing '{key}'"
@@ -57,7 +60,9 @@ def check_snapshot(s: dict, tol: float = 50.0) -> float:
 
     countries = s["countries"]
     isos = [c["iso"] for c in countries]
-    assert len(isos) == 245, f"expected 245 countries, got {len(isos)}"
+    assert len(isos) == N_COUNTRIES, (
+        f"expected {N_COUNTRIES} countries, got {len(isos)}"
+    )
     assert len(set(isos)) == len(isos), "duplicate iso codes"
 
     sum_comp = {k: 0.0 for k in COMPARTMENTS}
@@ -188,36 +193,16 @@ def ws_connect(ws_url: str):
     return _cm()
 
 
-PARAM_GRID = {
-    "r0": (0.0, 2.5, 20.0),
-    "incubation_days": (0.1, 5.0, 30.0),
-    "infectious_days": (0.1, 7.0, 60.0),
-    "fatality_rate": (0.0, 0.01, 1.0),
-    "vaccination_rate": (0.0, 0.0, 0.2),
-    "intervention": (0.0, 0.0, 1.0),
-    "mobility": (0.0, 1.0, 5.0),
-}
+PARAM_SPECS = {p["key"]: p for p in app_config.PARAMS}
+PARAM_GRID = {k: (p["min"], p["default"], p["max"]) for k, p in PARAM_SPECS.items()}
 VALIDATION_BOUNDS = {
-    "r0": (0, 20, -0.1, 20.1),
-    "incubation_days": (0.1, 30, 0.0, 30.1),
-    "infectious_days": (0.1, 60, 0.0, 60.1),
-    "fatality_rate": (0, 1, -0.1, 1.1),
-    "vaccination_rate": (0, 0.2, -0.1, 0.21),
-    "intervention": (0, 1, -0.1, 1.1),
-    "mobility": (0, 5, -0.1, 5.1),
+    k: (p["min"], p["max"], p["min"] - 0.1, p["max"] + 0.1)
+    for k, p in PARAM_SPECS.items()
 }
 
 
 def full_params(**over) -> dict:
-    base = {
-        "r0": 2.5,
-        "incubation_days": 5,
-        "infectious_days": 7,
-        "fatality_rate": 0.01,
-        "vaccination_rate": 0.0,
-        "intervention": 0.0,
-        "mobility": 1.0,
-    }
+    base = {k: p["default"] for k, p in PARAM_SPECS.items()}
     base.update(over)
     return base
 
@@ -275,7 +260,7 @@ def coupling(real_countries):
 class TestEngine:
     def test_load_countries_order(self):
         countries = load_countries()
-        assert len(countries) == 245
+        assert len(countries) == N_COUNTRIES
         pops = [c.population for c in countries]
         assert pops == sorted(pops, reverse=True)
 
@@ -395,7 +380,14 @@ class TestEngine:
         engine.set_country_intervention("ITA", v)
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(exp)
 
-    @pytest.mark.parametrize("speed,exp", [(0.0, 0.1), (999.0, 60.0), (10.0, 10.0)])
+    @pytest.mark.parametrize(
+        "speed,exp",
+        [
+            (app_config.SPEED_MIN - 1, app_config.SPEED_MIN),
+            (app_config.SPEED_MAX + 999, app_config.SPEED_MAX),
+            (10.0, 10.0),
+        ],
+    )
     def test_speed_clamp(self, engine, speed, exp):
         engine.set_speed(speed)
         assert engine.speed == pytest.approx(exp)
@@ -406,7 +398,7 @@ class TestEngine:
         assert engine.day == 1
         engine.seed("USA", 500)
         snap = engine.snapshot().model_dump()
-        assert len(snap["countries"]) == 245
+        assert len(snap["countries"]) == N_COUNTRIES
         assert snap["totals"]["s"] == pytest.approx(
             sum(c["s"] for c in snap["countries"]), rel=1e-9
         )
@@ -418,7 +410,7 @@ class TestEngine:
         engine.seed("USA", 1000)
         scen = engine.to_scenario()
         isos = {c["iso"] for c in scen["countries"]}
-        assert len(scen["countries"]) == len(engine.countries) == 245
+        assert len(scen["countries"]) == len(engine.countries) == N_COUNTRIES
         assert {"FRA", "USA", "JPN"} <= isos
 
     def test_apply_scenario_variants(self, engine):
@@ -435,7 +427,7 @@ class TestEngine:
 
     def test_to_scenario_empty_world(self, engine):
         scen = engine.to_scenario()
-        assert len(scen["countries"]) == 245
+        assert len(scen["countries"]) == N_COUNTRIES
         assert all(
             c["e"] == c["i"] == c["r"] == c["d"] == c["v"] == 0.0
             for c in scen["countries"]
@@ -452,10 +444,10 @@ class TestEngine:
             engine.step()
         assert [p["day"] for p in engine.history_points()] == [0, 1, 2, 3, 4, 5]
         fb = engine.frames_payload()
-        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == 245
+        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == N_COUNTRIES
         assert [f["day"] for f in fb["frame"]] == [0, 1, 2, 3, 4, 5]
         for f in fb["frame"]:
-            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == 245
+            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == N_COUNTRIES
         engine.reset()
         assert [p["day"] for p in engine.history_points()] == [0]
         assert [f["day"] for f in engine.frames_payload()["frame"]] == [0]
@@ -642,15 +634,10 @@ class TestValidation:
         with pytest.raises(ValidationError):
             Params(**{field: above})
 
-    def test_defaults_and_types(self):
-        p = Params()
-        assert (p.r0, p.incubation_days, p.infectious_days) == (2.5, 5.0, 7.0)
-        assert (p.fatality_rate, p.vaccination_rate, p.intervention, p.mobility) == (
-            0.01,
-            0.0,
-            0.0,
-            1.0,
-        )
+    def test_defaults_match_config(self):
+        p = Params().model_dump()
+        for key, spec in PARAM_SPECS.items():
+            assert p[key] == pytest.approx(spec["default"]), key
         with pytest.raises(ValidationError):
             Params(r0="x")
 
@@ -897,7 +884,7 @@ class TestBackup:
         lines = self._lines(path)
         assert len(lines) == 2
         assert json.loads(lines[0])["kind"] == "header"
-        assert json.loads(lines[0])["version"] == 4
+        assert json.loads(lines[0])["version"] == SAVE_VERSION
         frame0 = json.loads(lines[1])
         assert frame0["kind"] == "frame" and frame0["day"] == 0
 
@@ -922,12 +909,12 @@ class TestBackup:
         for _ in range(20):
             e.step()
         state = backup_mod.load_saved_state(path)
-        assert state["version"] == 4
+        assert state["version"] == SAVE_VERSION
         days = [f["day"] for f in state["frames"]]
         assert days == list(range(21))
         for f in state["frames"]:
             assert f["type"] == "snapshot" and f["running"] is False
-            assert len(f["countries"]) == 245
+            assert len(f["countries"]) == N_COUNTRIES
         live = e.frames_payload()
         usa = live["iso"].index("USA")
         for comp in ("s", "i", "r", "d"):
@@ -1014,9 +1001,7 @@ class TestBackup:
         for _ in range(3):
             e.step()
         with path.open("a", encoding="utf-8") as f:
-            f.write(
-                '{"kind": "frame", "day": 4, "s": [1, 2, 3'
-            )
+            f.write('{"kind": "frame", "day": 4, "s": [1, 2, 3')
         state = backup_mod.load_saved_state(path)
         assert [f["day"] for f in state["frames"]] == [0, 1, 2, 3]
 
@@ -1065,7 +1050,7 @@ class TestBackup:
             a.step()
         state = backup_mod.load_saved_state(path)
 
-        b = SimulationEngine() 
+        b = SimulationEngine()
         b.restore(state)
         assert b.day == 50
         assert b.params.r0 == pytest.approx(3.8)
@@ -1115,7 +1100,7 @@ class TestData:
 
     def test_countries(self):
         countries = self._load("countries.json")
-        assert len(countries) == 245
+        assert len(countries) == N_COUNTRIES
         isos = [c["iso"] for c in countries]
         assert len(set(isos)) == len(isos)
         for c in countries:
@@ -1166,9 +1151,23 @@ class TestRest:
     def test_health(self, client):
         assert client.get("/api/health").json() == {"status": "ok"}
 
+    def test_config_is_single_source(self, client):
+        cfg = client.get("/api/config").json()
+        assert cfg["saveVersion"] == app_config.SAVE_VERSION == SAVE_VERSION
+        assert cfg["dataLimit"] == app_config.DATA_LIMIT
+        assert {"default", "min", "max"} <= set(cfg["speed"])
+        assert isinstance(cfg["mapDefaultStates"], dict)
+        keys = {p["key"] for p in cfg["params"]}
+        assert keys == set(Params().model_dump())
+        for p in cfg["params"]:
+            assert {"key", "default", "min", "max", "step"} <= set(p)
+            assert Params(**{p["key"]: p["max"]})
+            with pytest.raises(ValidationError):
+                Params(**{p["key"]: p["max"] + 1})
+
     def test_countries(self, client):
         data = client.get("/api/countries").json()
-        assert len(data) == 245
+        assert len(data) == N_COUNTRIES
         assert {"iso", "name", "population", "lat", "lon"} <= data[0].keys()
 
     def test_geojson(self, client):
@@ -1221,8 +1220,9 @@ class TestRest:
         assert client.get("/api/health").status_code == 200
 
     def test_cors(self, client):
-        r = client.get("/api/health", headers={"Origin": "http://localhost:4200"})
-        assert r.headers.get("access-control-allow-origin") == "http://localhost:4200"
+        origin = app_config.CORS_ORIGINS[0]
+        r = client.get("/api/health", headers={"Origin": origin})
+        assert r.headers.get("access-control-allow-origin") == origin
         r2 = client.get("/api/health", headers={"Origin": "http://evil.example"})
         assert "access-control-allow-origin" not in {k.lower() for k in r2.headers}
 
@@ -1252,7 +1252,7 @@ class TestWebSocket:
             h = await recv_until(ws, lambda m: m.get("type") == "history")
             assert [p["day"] for p in h["points"]] == [0, 1, 2, 3, 4]
             fb = h["frames"]
-            assert len(fb["iso"]) == 245
+            assert len(fb["iso"]) == N_COUNTRIES
             assert [f["day"] for f in fb["frame"]] == [0, 1, 2, 3, 4]
             assert fb["frame"][-1]["i"][fb["iso"].index("USA")] >= 1
 
@@ -1314,9 +1314,7 @@ class TestWebSocket:
             assert next(c for c in s["countries"] if c["iso"] == "USA")[
                 "i"
             ] == pytest.approx(1100)
-            s = await ws.command(
-                {"type": "seed", "iso": "ZZZ", "count": 100}
-            )
+            s = await ws.command({"type": "seed", "iso": "ZZZ", "count": 100})
             check_snapshot(s)
 
     async def test_seed_negative_and_non_numeric(self, ws_url):
@@ -1326,9 +1324,7 @@ class TestWebSocket:
             check_snapshot(s)
             usa = next(c for c in s["countries"] if c["iso"] == "USA")
             assert usa["i"] >= 0 and usa["s"] <= usa["population"]
-            await ws.send(
-                {"type": "seed", "iso": "USA", "count": "abc"}
-            )
+            await ws.send({"type": "seed", "iso": "USA", "count": "abc"})
             check_snapshot(await ws.command({"type": "step"}))
 
     async def test_setparams_full_and_partial_merge(self, ws_url):
@@ -1344,9 +1340,7 @@ class TestWebSocket:
                     "params": full_params(infectious_days=9, fatality_rate=0.03),
                 }
             )
-            s = await ws.command(
-                {"type": "setParams", "params": {"r0": 7.5}}
-            )
+            s = await ws.command({"type": "setParams", "params": {"r0": 7.5}})
             assert s["params"]["r0"] == 7.5
             assert (
                 s["params"]["infectious_days"] == 9
@@ -1361,7 +1355,14 @@ class TestWebSocket:
             s = await ws.command({"type": "step"})
             assert s["params"]["r0"] == before["params"]["r0"]
 
-    @pytest.mark.parametrize("speed,exp", [(10, 10.0), (0, 0.1), (1000, 60.0)])
+    @pytest.mark.parametrize(
+        "speed,exp",
+        [
+            (10, 10.0),
+            (0, app_config.SPEED_MIN),
+            (app_config.SPEED_MAX + 1000, app_config.SPEED_MAX),
+        ],
+    )
     async def test_setspeed_clamp(self, ws_url, speed, exp):
         async with ws_connect(ws_url) as ws:
             await ws.recv()
@@ -1475,11 +1476,13 @@ class TestReplayCompleteness:
         points, fb = h["points"], h["frames"]
         assert [p["day"] for p in points] == list(range(n + 1))
         assert [f["day"] for f in fb["frame"]] == list(range(n + 1))
-        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == 245
+        assert len(fb["iso"]) == len(fb["name"]) == len(fb["population"]) == N_COUNTRIES
         for f in fb["frame"]:
-            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == 245
+            assert len(f["s"]) == len(f["i"]) == len(f["c"]) == N_COUNTRIES
         last = fb["frame"][-1]
-        assert points[-1]["totals"]["i"] == pytest.approx(sum(last["i"]), abs=245)
+        assert points[-1]["totals"]["i"] == pytest.approx(
+            sum(last["i"]), abs=N_COUNTRIES
+        )
         assert last["i"][fb["iso"].index("USA")] >= 1
 
     async def test_disconnect_reconnect_preserves_state(self, ws_url):
@@ -1511,10 +1514,10 @@ class TestBackupRest:
                 await ws.command({"type": "step"})
             with httpx.Client(base_url=base_url, timeout=5.0) as c:
                 state = c.get("/api/backup").json()
-        assert state["version"] == 4
+        assert state["version"] == SAVE_VERSION
         days = [f["day"] for f in state["frames"]]
         assert days[0] == 0 and days[-1] == 6
-        assert all(len(f["countries"]) == 245 for f in state["frames"])
+        assert all(len(f["countries"]) == N_COUNTRIES for f in state["frames"])
         usa = next(c for c in state["frames"][-1]["countries"] if c["iso"] == "USA")
         assert usa["i"] >= 1
 

@@ -4,11 +4,13 @@ import {
   Component,
   OnInit,
   inject,
+  provideAppInitializer,
   provideBrowserGlobalErrorListeners,
 } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
 import { ControlPanel, EpiChart, Leaderboard, WorldMap, WorldTotals } from './app/components';
+import { ConfigService } from './app/config.service';
 import { SimulationService } from './app/simulation.service';
 
 /**
@@ -56,7 +58,11 @@ export class App implements OnInit {
 }
 
 const appConfig: ApplicationConfig = {
-  providers: [provideBrowserGlobalErrorListeners(), provideHttpClient()],
+  providers: [
+    provideBrowserGlobalErrorListeners(),
+    provideHttpClient(),
+    provideAppInitializer(() => inject(ConfigService).load()),
+  ],
 };
 
 bootstrapApplication(App, appConfig).catch((err) => console.error(err));

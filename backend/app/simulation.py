@@ -18,11 +18,21 @@ from pathlib import Path
 
 import numpy as np
 from app.backup import BackupWriter
+from app.config import (
+    DATA_LIMIT,
+    LOCKDOWN_MAX,
+    LOCKDOWN_MIN,
+    SEED_DEFAULT,
+    SPEED_DEFAULT,
+    SPEED_MAX,
+    SPEED_MIN,
+)
 from app.models import CountryMeta, CountrySnapshot, Params, Snapshot, Totals
 
 DATA_DIR = Path(__file__).parent / "data"
 COUNTRIES_FILE = DATA_DIR / "countries.json"
 FLIGHTS_FILE = DATA_DIR / "flights.json"
+
 
 def load_countries() -> list[CountryMeta]:
     """Read ``countries.json`` and parse it into :class:`CountryMeta` records.
@@ -190,7 +200,6 @@ class SeirModel:
         np.clip(self.E, 0.0, None, out=self.E)
         np.clip(self.I, 0.0, None, out=self.I)
 
-DATA_LIMIT = 10_000
 
 def _columnar_frame(f: dict) -> dict:
     """Serialise one ``frames_log`` entry to the compact columnar wire form.
@@ -233,7 +242,7 @@ class SimulationEngine:
         self.params = Params()
         self.day = 0
         self.running = False
-        self.speed = 5.0
+        self.speed = SPEED_DEFAULT
         self.history: list[dict] = []
         self.frames_log: list[dict] = []
         self._backup = backup
@@ -323,7 +332,7 @@ class SimulationEngine:
             self._backup.reset(self._backup_header())
         self._record()
 
-    def seed(self, iso: str, count: float = 100.0) -> None:
+    def seed(self, iso: str, count: float = SEED_DEFAULT) -> None:
         """Start an outbreak of ``count`` infectious people in country ``iso``.
 
         Unknown ISO codes are ignored.
@@ -348,7 +357,7 @@ class SimulationEngine:
         """
         idx = self.index.get(iso)
         if idx is not None:
-            self.model.C[idx] = max(0.0, min(1.0, value))
+            self.model.C[idx] = max(LOCKDOWN_MIN, min(LOCKDOWN_MAX, value))
             self._record()
 
     def to_scenario(self, name: str = "scenario") -> dict:
@@ -399,7 +408,7 @@ class SimulationEngine:
         """
         self.reset()
         self.params = Params(**data.get("params", {}))
-        self.set_speed(float(data.get("speed", 5.0)))
+        self.set_speed(float(data.get("speed", SPEED_DEFAULT)))
         self.day = int(data.get("day", 0))
         m = self.model
         for rec in data.get("countries", []):
@@ -412,7 +421,9 @@ class SimulationEngine:
             m.R[idx] = max(0.0, float(rec.get("r", 0.0)))
             m.D[idx] = max(0.0, float(rec.get("d", 0.0)))
             m.V[idx] = max(0.0, float(rec.get("v", 0.0)))
-            m.C[idx] = max(0.0, min(1.0, float(rec.get("intervention", 0.0))))
+            m.C[idx] = max(
+                LOCKDOWN_MIN, min(LOCKDOWN_MAX, float(rec.get("intervention", 0.0)))
+            )
         self.history.clear()
         self.frames_log.clear()
         if self._backup is not None:
@@ -453,10 +464,12 @@ class SimulationEngine:
                 arrays["D"][idx] = max(0.0, float(rec.get("d", 0.0)))
                 arrays["V"][idx] = max(0.0, float(rec.get("v", 0.0)))
                 arrays["C"][idx] = max(
-                    0.0, min(1.0, float(rec.get("intervention", 0.0)))
+                    LOCKDOWN_MIN, min(LOCKDOWN_MAX, float(rec.get("intervention", 0.0)))
                 )
             params = Params(**fr.get("params", {})).model_dump()
-            speed = max(0.1, min(60.0, float(fr.get("speed", 5.0))))
+            speed = max(
+                SPEED_MIN, min(SPEED_MAX, float(fr.get("speed", SPEED_DEFAULT)))
+            )
             day = int(fr.get("day", 0))
             rebuilt_frames.append(
                 {"day": day, "speed": speed, "params": params, **arrays}
@@ -489,8 +502,8 @@ class SimulationEngine:
         self.params = params
 
     def set_speed(self, speed: float) -> None:
-        """Set the auto-advance speed in steps/second, clamped to [0.1, 60]."""
-        self.speed = max(0.1, min(60.0, speed))
+        """Set the auto-advance speed in steps/second, clamped to the config range."""
+        self.speed = max(SPEED_MIN, min(SPEED_MAX, speed))
 
     def step(self) -> None:
         """Advance the model by one day and increment the day counter."""

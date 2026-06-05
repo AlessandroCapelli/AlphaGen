@@ -152,6 +152,7 @@ Base URL: `http://localhost:8000`
 | Metodo | Path                  | Descrizione                                      |
 | ------ | --------------------- | ------------------------------------------------ |
 | `GET`  | `/api/health`         | Healthcheck                                      |
+| `GET`  | `/api/config`         | Configurazione unica (default/bound/limiti)      |
 | `GET`  | `/api/countries`      | Metadati nazioni (ISO, popolazione, coordinate)  |
 | `GET`  | `/api/geojson`        | Confini del mondo (GeoJSON) per la mappa         |
 | `GET`  | `/api/flights`        | Rete voli (coppie di paesi) per gli archi        |
@@ -243,11 +244,22 @@ scorrere la timeline fino al giorno 0 (lo stato è condiviso e persistente):
 
 ## Configurazione
 
-- **Porte**: backend `8000`, frontend `4200`. L'URL del backend usato dal client
-  è in `frontend/src/app/simulation.service.ts`.
-- **CORS**: il backend accetta richieste da `http://localhost:4200` e
-  `http://127.0.0.1:4200` (vedi `backend/app/main.py`). In produzione aggiorna
-  le origini consentite.
+Tutti i valori di dominio e comportamento (default e bound dei parametri, limiti,
+versione del formato di salvataggio, velocità, dimensione del focolaio, default
+della mappa, porta e origini CORS) vivono in **un'unica sorgente**:
+`backend/app/config.json` (vedi `backend/app/config.py`). Non sono mai
+hardcoded nei singoli moduli: il modello Pydantic ne deriva default e bound, il
+motore ne legge limiti e clamp, e il frontend li scarica a runtime da
+`GET /api/config` per costruire slider, validazione e default — così nessun
+valore è duplicato tra backend e frontend.
+
+- **Parametri / limiti / versione / speed / seed / CORS**: modificali in
+  `backend/app/config.json`; si propagano automaticamente a backend e frontend.
+- **Connessione del client** (non derivabile dal backend stesso): gli URL/porta a
+  cui il frontend si collega sono in `frontend/src/app/config.ts`
+  (`API_BASE` / `WS_URL`); la porta del backend e le origini CORS in
+  `config.json` (`server.port`, `server.corsOrigins`). Per un deploy non-dev,
+  aggiorna entrambi.
 
 ## Dati
 

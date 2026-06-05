@@ -6,53 +6,23 @@ frontend. They are intentionally flat and JSON-friendly.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from app.config import PARAMS as _PARAM_SPECS
+from pydantic import BaseModel, Field, create_model
 
+_param_fields = {
+    spec["key"]: (
+        float,
+        Field(
+            float(spec["default"]),
+            ge=float(spec["min"]),
+            le=float(spec["max"]),
+            description=spec.get("description", ""),
+        ),
+    )
+    for spec in _PARAM_SPECS
+}
 
-class Params(BaseModel):
-    """Epidemiological parameters of the model.
-
-    Every field can be changed live while the simulation is running; the engine
-    picks up the new values on the next daily step.
-    """
-
-    r0: float = Field(2.5, ge=0, le=20, description="Basic reproduction number (R0)")
-    incubation_days: float = Field(
-        5.0,
-        ge=0.1,
-        le=30,
-        description="Mean latency of the Exposed phase (E->I), in days",
-    )
-    infectious_days: float = Field(
-        7.0,
-        ge=0.1,
-        le=60,
-        description="Mean duration of the Infectious phase (I->R/D), in days",
-    )
-    fatality_rate: float = Field(
-        0.01,
-        ge=0,
-        le=1,
-        description="Fraction of infectious individuals who die instead of recovering",
-    )
-    vaccination_rate: float = Field(
-        0.0,
-        ge=0,
-        le=0.2,
-        description="Daily fraction of susceptibles moved to the Vaccinated compartment",
-    )
-    intervention: float = Field(
-        0.0,
-        ge=0,
-        le=1,
-        description="Contact reduction (lockdown/distancing) that lowers the effective beta",
-    )
-    mobility: float = Field(
-        1.0,
-        ge=0,
-        le=5,
-        description="Global multiplier applied to inter-country travel coupling",
-    )
+Params: type[BaseModel] = create_model("Params", **_param_fields)
 
 
 class CountrySnapshot(BaseModel):

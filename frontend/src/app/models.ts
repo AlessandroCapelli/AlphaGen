@@ -155,3 +155,46 @@ export interface SavedState {
   /** Chart totals series. Falls back to the frames' totals when absent. */
   history?: HistoryPoint[];
 }
+
+/** One tunable parameter's numeric spec, as served by `GET /api/config`. */
+export interface ParamSpec {
+  /** Parameter key (matches a {@link Params} field). */
+  key: keyof Params;
+  /** Default value. */
+  default: number;
+  /** Slider/validation minimum. */
+  min: number;
+  /** Slider/validation maximum. */
+  max: number;
+  /** Slider step. */
+  step: number;
+  /** Render as a percentage when true. */
+  percent: boolean;
+  /** English description (backend doc; unused by the UI). */
+  description: string;
+}
+
+/**
+ * The single config source served by `GET /api/config` — defaults, bounds,
+ * limits, version, speed/seed settings and map defaults. The frontend derives
+ * its sliders, validation and defaults from this, so no domain value is
+ * duplicated across the backend and frontend (see `backend/app/config.json`).
+ */
+export interface AppConfig {
+  /** Only supported import/export format version. */
+  saveVersion: number;
+  /** Retention cap shared by chart history and the timeline frame buffer. */
+  dataLimit: number;
+  /** Outbreak seed defaults. */
+  seed: { default: number; min: number };
+  /** Auto-advance speed: engine clamp (min/max) + slider spec (uiMin/uiMax/uiStep). */
+  speed: { default: number; min: number; max: number; uiMin: number; uiMax: number; uiStep: number };
+  /** Per-country lockdown slider spec. */
+  lockdown: { min: number; max: number; step: number };
+  /** Epidemiological parameters, in canonical order. */
+  params: ParamSpec[];
+  /** Compartments composing the default map heat metric. */
+  mapDefaultStates: Record<string, boolean>;
+  /** Server settings (port + allowed CORS origins). */
+  server: { port: number; corsOrigins: string[] };
+}

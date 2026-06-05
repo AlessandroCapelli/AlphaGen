@@ -29,8 +29,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-BACKUP_VERSION = 4
-MAX_RECOVERY_DAYS = 10_000
+from app.config import DATA_LIMIT, SAVE_VERSION
+
+BACKUP_VERSION = SAVE_VERSION
+MAX_RECOVERY_DAYS = DATA_LIMIT
 
 
 class BackupWriter:

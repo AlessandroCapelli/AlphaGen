@@ -39,7 +39,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from app import backup
+from app import backup, config
 from app.backup import BackupWriter
 from app.models import CountryMeta, Params, Preset
 from app.simulation import SimulationEngine
@@ -126,13 +126,13 @@ async def _handle_command(
     elif cmd == "step":
         engine.step()
     elif cmd == "seed":
-        engine.seed(msg.get("iso", ""), float(msg.get("count", 100)))
+        engine.seed(msg.get("iso", ""), float(msg.get("count", config.SEED_DEFAULT)))
     elif cmd == "setParams":
         merged = engine.params.model_dump()
         merged.update(msg.get("params", {}))
         engine.set_params(Params(**merged))
     elif cmd == "setSpeed":
-        engine.set_speed(float(msg.get("speed", 5)))
+        engine.set_speed(float(msg.get("speed", config.SPEED_DEFAULT)))
     elif cmd == "setCountryIntervention":
         engine.set_country_intervention(msg.get("iso", ""), float(msg.get("value", 0)))
     else:
@@ -187,7 +187,7 @@ app = FastAPI(title="AlphaGen Epidemic Simulator", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
+    allow_origins=config.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -197,6 +197,17 @@ app.add_middleware(
 def health() -> dict:
     """Liveness probe used by the frontend and for smoke tests."""
     return {"status": "ok"}
+
+
+@app.get("/api/config", tags=["meta"])
+def get_config() -> JSONResponse:
+    """Return the single config source (``config.json``).
+
+    The frontend fetches this at startup and derives its parameter sliders,
+    validation bounds, defaults, limits and save version from it — so those
+    domain values live in exactly one place (no cross-language duplication).
+    """
+    return JSONResponse(config.public_config())
 
 
 @app.get("/api/countries", response_model=list[CountryMeta], tags=["meta"])

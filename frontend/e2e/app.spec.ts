@@ -4,11 +4,10 @@ import { readFileSync } from 'node:fs';
 const WS = 'ws://localhost:8000/ws';
 const API = 'http://localhost:8000';
 
+let PARAM_DEFAULTS: Record<string, number> = {};
+
 function params(over: Record<string, number> = {}): Record<string, number> {
-  return {
-    r0: 2.5, incubation_days: 5, infectious_days: 7, fatality_rate: 0.01,
-    vaccination_rate: 0, intervention: 0, mobility: 1, ...over,
-  };
+  return { ...PARAM_DEFAULTS, ...over };
 }
 
 async function control(cmds: Record<string, unknown>[]): Promise<void> {
@@ -109,6 +108,11 @@ async function runSomeDays(page: Page, min = 20): Promise<void> {
     expect(Number(await dayCell(page).textContent())).toBeGreaterThan(min);
   }).toPass({ timeout: 12_000 });
 }
+
+test.beforeAll(async () => {
+  const cfg = await getJson('/api/config');
+  PARAM_DEFAULTS = Object.fromEntries(cfg.params.map((p: any) => [p.key, p.default]));
+});
 
 test.beforeEach(async () => {
   await control([{ type: 'reset' }]);
