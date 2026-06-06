@@ -20,6 +20,7 @@ import numpy as np
 from app.backup import BackupWriter
 from app.config import (
     DATA_LIMIT,
+    LOCKDOWN_DEFAULT,
     LOCKDOWN_MAX,
     LOCKDOWN_MIN,
     SEED_DEFAULT,
@@ -71,7 +72,7 @@ def build_coupling(countries: list[CountryMeta]) -> np.ndarray:
     n = len(countries)
     index = {c.iso: i for i, c in enumerate(countries)}
     spec = json.loads(FLIGHTS_FILE.read_text(encoding="utf-8"))
-    base = float(spec.get("base_coupling", 0.03))
+    base = float(spec.get("base_coupling", 0.0526))
     eps = float(spec.get("baseline_epsilon", 1e-7))
 
     w = np.full((n, n), eps, dtype=float)
@@ -101,18 +102,29 @@ class SeirModel:
         D  deceased
         V  vaccinated (immune)
 
-    Daily forward-Euler update (dt = 1 day):
-        beta_eff = (r0 / infectious_days) * (1 - intervention)
-        sigma    = 1 / incubation_days
-        gamma    = 1 / infectious_days
-        lambda_i = beta_eff * I_i / N_i
-                 + mobility * sum_j W[i, j] * I_j / N_j   # imported pressure
-        newE = lambda_i * S_i
-        newI = sigma * E_i
-        out  = gamma * I_i                # individuals leaving I this step
+    The model also holds a per-country intervention array ``C`` in ``[0, 1]``
+    (local lockdown/border-closure strength). It is not a compartment: it scales
+    both the local and imported infectious pressure via ``open_frac = 1 - C``.
+
+    Daily forward-Euler update (dt = 1 day), applied per country ``i``:
+        beta_eff   = (r0 / infectious_days) * (1 - intervention)
+        sigma      = 1 / incubation_days
+        gamma      = 1 / infectious_days
+        open_i     = 1 - C_i
+        prev_i     = open_i * I_i / N_i
+        lambda_i   = beta_eff * prev_i
+                   + mobility * open_i * sum_j W[i, j] * prev_j
+        newE = min(lambda_i * S_i, S_i)
+        newI = min(sigma * E_i, E_i)
+        out  = min(gamma * I_i, I_i)
         newD = fatality_rate * out
-        newR = (1 - fatality_rate) * out
-        newV = vaccination_rate * S_i
+        newR = out - newD
+        newV = clip(min(vaccination_rate * S_i, S_i - newE), 0, +inf)
+
+    Here ``intervention`` is the single global parameter folded into
+    ``beta_eff``, while ``C_i`` is the per-country override. The ``min``/``clip``
+    guards keep every transfer within the available stock so no compartment goes
+    negative and the population is conserved.
 
     All compartments are stored as NumPy arrays of shape ``(n,)`` where ``n`` is
     the number of countries, so a step is a handful of vector operations.
@@ -130,6 +142,14 @@ class SeirModel:
         self.N = populations.astype(float)
         self.W = coupling.astype(float)
 
+        self._clear()
+
+    def _clear(self) -> None:
+        """Reset every compartment to the all-susceptible state (S = N, rest = 0).
+
+        ``S`` is a fresh **copy** of ``N`` (not a view) so later in-place updates
+        never mutate the stored population array.
+        """
         self.S = self.N.copy()
         self.E = np.zeros(self.n)
         self.I = np.zeros(self.n)
@@ -140,13 +160,7 @@ class SeirModel:
 
     def reset(self) -> None:
         """Return everyone to the susceptible compartment (S = N, rest = 0)."""
-        self.S = self.N.copy()
-        self.E[:] = 0
-        self.I[:] = 0
-        self.R[:] = 0
-        self.D[:] = 0
-        self.V[:] = 0
-        self.C[:] = 0
+        self._clear()
 
     def seed(self, idx: int, count: float) -> None:
         """Introduce an initial outbreak.
@@ -199,6 +213,41 @@ class SeirModel:
         np.clip(self.S, 0.0, None, out=self.S)
         np.clip(self.E, 0.0, None, out=self.E)
         np.clip(self.I, 0.0, None, out=self.I)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Clamp ``value`` to the closed interval ``[lo, hi]``."""
+    return max(lo, min(hi, value))
+
+
+def _write_country_record(arrays: dict, idx: int, rec: dict, s_default: float) -> None:
+    """Write one country's compartments from a scenario/snapshot record.
+
+    Fills ``arrays`` (keyed by uppercase compartment letter) at position ``idx``
+    from ``rec``: each compartment is floored at zero, the susceptible fallback
+    is ``s_default``, and the intervention is clamped to the lockdown range.
+    """
+    arrays["S"][idx] = max(0.0, float(rec.get("s", s_default)))
+    arrays["E"][idx] = max(0.0, float(rec.get("e", 0.0)))
+    arrays["I"][idx] = max(0.0, float(rec.get("i", 0.0)))
+    arrays["R"][idx] = max(0.0, float(rec.get("r", 0.0)))
+    arrays["D"][idx] = max(0.0, float(rec.get("d", 0.0)))
+    arrays["V"][idx] = max(0.0, float(rec.get("v", 0.0)))
+    arrays["C"][idx] = _clamp(
+        float(rec.get("intervention", LOCKDOWN_DEFAULT)), LOCKDOWN_MIN, LOCKDOWN_MAX
+    )
+
+
+def _totals(m: "SeirModel") -> dict:
+    """Sum every compartment to whole-world totals in ``s,e,i,r,d,v`` order."""
+    return {
+        "s": float(m.S.sum()),
+        "e": float(m.E.sum()),
+        "i": float(m.I.sum()),
+        "r": float(m.R.sum()),
+        "d": float(m.D.sum()),
+        "v": float(m.V.sum()),
+    }
 
 
 def _columnar_frame(f: dict) -> dict:
@@ -258,6 +307,21 @@ class SimulationEngine:
             "population": [float(self.model.N[i]) for i in range(self.model.n)],
         }
 
+    @staticmethod
+    def _append_or_replace(buffer: list[dict], day: int, item: dict) -> None:
+        """Append ``item`` for ``day`` to ``buffer``, replacing same-day tail.
+
+        If the last entry already belongs to ``day`` it is overwritten in place;
+        otherwise ``item`` is appended and the buffer is trimmed to
+        :data:`DATA_LIMIT` from the front.
+        """
+        if buffer and buffer[-1]["day"] == day:
+            buffer[-1] = item
+        else:
+            buffer.append(item)
+            if len(buffer) > DATA_LIMIT:
+                del buffer[0]
+
     def _record(self) -> None:
         """Record the current day in both replay buffers.
 
@@ -266,20 +330,10 @@ class SimulationEngine:
         appends a new one and trims to the caps.
         """
         m = self.model
-        totals = {
-            "s": float(m.S.sum()),
-            "e": float(m.E.sum()),
-            "i": float(m.I.sum()),
-            "r": float(m.R.sum()),
-            "d": float(m.D.sum()),
-            "v": float(m.V.sum()),
-        }
-        if self.history and self.history[-1]["day"] == self.day:
-            self.history[-1]["totals"] = totals
-        else:
-            self.history.append({"day": self.day, "totals": totals})
-            if len(self.history) > DATA_LIMIT:
-                del self.history[0]
+        totals = _totals(m)
+        self._append_or_replace(
+            self.history, self.day, {"day": self.day, "totals": totals}
+        )
 
         frame = {
             "day": self.day,
@@ -293,12 +347,7 @@ class SimulationEngine:
             "V": m.V.copy(),
             "C": m.C.copy(),
         }
-        if self.frames_log and self.frames_log[-1]["day"] == self.day:
-            self.frames_log[-1] = frame
-        else:
-            self.frames_log.append(frame)
-            if len(self.frames_log) > DATA_LIMIT:
-                del self.frames_log[0]
+        self._append_or_replace(self.frames_log, self.day, frame)
 
         if self._backup is not None:
             self._backup.append_day(_columnar_frame(frame))
@@ -315,9 +364,7 @@ class SimulationEngine:
         rounded to whole people to keep the payload small.
         """
         return {
-            "iso": [c.iso for c in self.countries],
-            "name": [c.name for c in self.countries],
-            "population": [float(self.model.N[i]) for i in range(self.model.n)],
+            **self._backup_header(),
             "frame": [_columnar_frame(f) for f in self.frames_log],
         }
 
@@ -357,7 +404,7 @@ class SimulationEngine:
         """
         idx = self.index.get(iso)
         if idx is not None:
-            self.model.C[idx] = max(LOCKDOWN_MIN, min(LOCKDOWN_MAX, value))
+            self.model.C[idx] = _clamp(value, LOCKDOWN_MIN, LOCKDOWN_MAX)
             self._record()
 
     def to_scenario(self, name: str = "scenario") -> dict:
@@ -411,19 +458,12 @@ class SimulationEngine:
         self.set_speed(float(data.get("speed", SPEED_DEFAULT)))
         self.day = int(data.get("day", 0))
         m = self.model
+        arrays = {"S": m.S, "E": m.E, "I": m.I, "R": m.R, "D": m.D, "V": m.V, "C": m.C}
         for rec in data.get("countries", []):
             idx = self.index.get(rec.get("iso", ""))
             if idx is None:
                 continue
-            m.S[idx] = max(0.0, float(rec.get("s", m.N[idx])))
-            m.E[idx] = max(0.0, float(rec.get("e", 0.0)))
-            m.I[idx] = max(0.0, float(rec.get("i", 0.0)))
-            m.R[idx] = max(0.0, float(rec.get("r", 0.0)))
-            m.D[idx] = max(0.0, float(rec.get("d", 0.0)))
-            m.V[idx] = max(0.0, float(rec.get("v", 0.0)))
-            m.C[idx] = max(
-                LOCKDOWN_MIN, min(LOCKDOWN_MAX, float(rec.get("intervention", 0.0)))
-            )
+            _write_country_record(arrays, idx, rec, float(m.N[idx]))
         self.history.clear()
         self.frames_log.clear()
         if self._backup is not None:
@@ -457,19 +497,9 @@ class SimulationEngine:
                 idx = self.index.get(rec.get("iso", ""))
                 if idx is None:
                     continue
-                arrays["S"][idx] = max(0.0, float(rec.get("s", 0.0)))
-                arrays["E"][idx] = max(0.0, float(rec.get("e", 0.0)))
-                arrays["I"][idx] = max(0.0, float(rec.get("i", 0.0)))
-                arrays["R"][idx] = max(0.0, float(rec.get("r", 0.0)))
-                arrays["D"][idx] = max(0.0, float(rec.get("d", 0.0)))
-                arrays["V"][idx] = max(0.0, float(rec.get("v", 0.0)))
-                arrays["C"][idx] = max(
-                    LOCKDOWN_MIN, min(LOCKDOWN_MAX, float(rec.get("intervention", 0.0)))
-                )
+                _write_country_record(arrays, idx, rec, 0.0)
             params = Params(**fr.get("params", {})).model_dump()
-            speed = max(
-                SPEED_MIN, min(SPEED_MAX, float(fr.get("speed", SPEED_DEFAULT)))
-            )
+            speed = _clamp(float(fr.get("speed", SPEED_DEFAULT)), SPEED_MIN, SPEED_MAX)
             day = int(fr.get("day", 0))
             rebuilt_frames.append(
                 {"day": day, "speed": speed, "params": params, **arrays}
@@ -503,7 +533,7 @@ class SimulationEngine:
 
     def set_speed(self, speed: float) -> None:
         """Set the auto-advance speed in steps/second, clamped to the config range."""
-        self.speed = max(SPEED_MIN, min(SPEED_MAX, speed))
+        self.speed = _clamp(speed, SPEED_MIN, SPEED_MAX)
 
     def step(self) -> None:
         """Advance the model by one day and increment the day counter."""
@@ -529,14 +559,7 @@ class SimulationEngine:
             )
             for i, c in enumerate(self.countries)
         ]
-        totals = Totals(
-            s=float(m.S.sum()),
-            e=float(m.E.sum()),
-            i=float(m.I.sum()),
-            r=float(m.R.sum()),
-            d=float(m.D.sum()),
-            v=float(m.V.sum()),
-        )
+        totals = Totals(**_totals(m))
         return Snapshot(
             day=self.day,
             running=self.running,

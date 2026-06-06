@@ -6,6 +6,7 @@ frontend. They are intentionally flat and JSON-friendly.
 
 from __future__ import annotations
 
+from app.config import LOCKDOWN_DEFAULT as _LOCKDOWN_DEFAULT
 from app.config import PARAMS as _PARAM_SPECS
 from pydantic import BaseModel, Field, create_model
 
@@ -38,7 +39,7 @@ class CountrySnapshot(BaseModel):
     d: float = Field(description="Deceased count")
     v: float = Field(description="Vaccinated (immune) count")
     intervention: float = Field(
-        0.0, description="Per-country intervention level in [0, 1]"
+        _LOCKDOWN_DEFAULT, description="Per-country intervention level in [0, 1]"
     )
 
 

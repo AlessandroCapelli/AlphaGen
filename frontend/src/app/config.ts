@@ -1,6 +1,7 @@
 /**
  * Frontend-only configuration: values the frontend needs *before* it can talk to
- * the backend (connection URLs) plus the per-parameter UI copy and display order.
+ * the backend (connection URLs), client-side timings and presentation tunables,
+ * plus the per-parameter UI copy and display order.
  *
  * Every NUMERIC domain value (param defaults/bounds/step, limits, save version,
  * speed/seed settings, map defaults) is NOT here — it comes from the backend's
@@ -18,6 +19,18 @@ export const WS_URL = 'ws://localhost:8000/ws';
 
 /** Delay before the WebSocket auto-reconnect attempt (ms). */
 export const RECONNECT_MS = 1500;
+
+/** Delay before retrying the initial map dataset load after a failure (ms). */
+export const GEO_RETRY_MS = 1500;
+
+/** Target number of sampled points per leaderboard active-case sparkline. */
+export const SPARKLINE_POINTS = 28;
+
+/** Attempts to fetch the backend config while the server is still coming up. */
+export const CONFIG_RETRY_ATTEMPTS = 8;
+
+/** Delay between backend-config fetch attempts at startup (ms). */
+export const CONFIG_RETRY_DELAY_MS = 1000;
 
 /**
  * Per-parameter UI copy (Italian label + help) in display order. The numeric

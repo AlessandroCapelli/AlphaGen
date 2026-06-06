@@ -64,12 +64,16 @@ async function intOf(locator: Locator): Promise<number> {
   return Number(((await locator.textContent()) ?? '').replace(/[^\d-]/g, '')) || 0;
 }
 
-async function open(page: Page): Promise<void> {
-  await page.goto('/');
+async function waitForReady(page: Page): Promise<void> {
   await page.locator('vite-error-overlay').waitFor({ state: 'detached', timeout: 60_000 })
     .catch(() => undefined);
   await expect(page.locator('.status')).toHaveClass(/on/);
   await page.waitForTimeout(1500);
+}
+
+async function open(page: Page): Promise<void> {
+  await page.goto('/');
+  await waitForReady(page);
 }
 
 async function openCard(page: Page): Promise<{ x: number; y: number }> {
@@ -102,11 +106,33 @@ const speedSlider = (p: Page) => speedLine(p).locator('input[type=range]');
 const speedBadge = (p: Page) => speedLine(p).locator('.ph-badge');
 const liveBadge = (p: Page) => p.locator('.ph-badge.live');
 
-async function runSomeDays(page: Page, min = 20): Promise<void> {
-  await control([{ type: 'reset' }, { type: 'setSpeed', speed: 30 }, { type: 'play' }]);
+async function waitForDay(page: Page, min: number, timeout = 12_000): Promise<void> {
   await expect(async () => {
     expect(Number(await dayCell(page).textContent())).toBeGreaterThan(min);
-  }).toPass({ timeout: 12_000 });
+  }).toPass({ timeout });
+}
+
+async function runSomeDays(page: Page, min = 20): Promise<void> {
+  await control([{ type: 'reset' }, { type: 'setSpeed', speed: 30 }, { type: 'play' }]);
+  await waitForDay(page, min);
+}
+
+async function importFile(page: Page, content: string, name = 'import.json'): Promise<void> {
+  await page.locator('input[type=file]').setInputFiles({
+    name, mimeType: 'application/json', buffer: Buffer.from(content),
+  });
+}
+
+function captureDialogs(page: Page): { messages: string[]; last(): string } {
+  const messages: string[] = [];
+  page.on('dialog', (d) => { messages.push(d.message()); void d.accept(); });
+  return { messages, last: () => messages[messages.length - 1] ?? '' };
+}
+
+async function pauseAndReadDay(page: Page, wait = 700): Promise<string> {
+  await page.getByRole('button', { name: /Pausa/ }).click();
+  await page.waitForTimeout(wait);
+  return (await dayCell(page).textContent())!;
 }
 
 test.beforeAll(async () => {
@@ -119,26 +145,22 @@ test.beforeEach(async () => {
 });
 
 test.describe('transport', () => {
-  test('connessione stabilita', async ({ page }) => {
+  test('connection is established', async ({ page }) => {
     await open(page);
     await expect(page.locator('.status')).toHaveText(/connesso/);
   });
 
-  test('Avvia avanza il giorno, Pausa lo ferma', async ({ page }) => {
+  test('Play advances the day, Pause stops it', async ({ page }) => {
     await open(page);
     await expect(dayCell(page)).toHaveText('0');
     await page.getByRole('button', { name: /Avvia/ }).click();
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(2);
-    }).toPass({ timeout: 10_000 });
-    await page.getByRole('button', { name: /Pausa/ }).click();
-    await page.waitForTimeout(700);
-    const v1 = Number(await dayCell(page).textContent());
+    await waitForDay(page, 2, 10_000);
+    const v1 = Number(await pauseAndReadDay(page));
     await page.waitForTimeout(900);
     expect(Number(await dayCell(page).textContent())).toBe(v1);
   });
 
-  test('Step disabilitato in run, +1 giorno in pausa', async ({ page }) => {
+  test('Step is disabled while running and advances one day while paused', async ({ page }) => {
     await open(page);
     const step = page.getByRole('button', { name: /Step/ });
     await expect(step).toBeEnabled();
@@ -152,7 +174,7 @@ test.describe('transport', () => {
     await expect(dayCell(page)).toHaveText('1');
   });
 
-  test('Reset riporta al giorno 0', async ({ page }) => {
+  test('Reset returns to day 0', async ({ page }) => {
     await open(page);
     await page.getByRole('button', { name: /Step/ }).click();
     await expect(dayCell(page)).toHaveText('1');
@@ -161,14 +183,14 @@ test.describe('transport', () => {
   });
 });
 
-test.describe('parametri', () => {
-  test('slider R0 aggiorna il valore', async ({ page }) => {
+test.describe('parameters', () => {
+  test('the R0 slider updates its value', async ({ page }) => {
     await open(page);
     await setRange(paramSlider(page, 'R₀'), 7);
     await expect(paramVal(page, 'R₀')).toHaveText('7');
   });
 
-  test('gli estremi del modello sono raggiungibili', async ({ page }) => {
+  test('the model extremes are reachable', async ({ page }) => {
     await open(page);
     await setRange(paramSlider(page, 'Letalità'), 1);
     await expect(paramVal(page, 'Letalità')).toHaveText('100.00%');
@@ -176,20 +198,20 @@ test.describe('parametri', () => {
     await expect(paramVal(page, 'R₀')).toHaveText('20');
   });
 
-  test('applicare un preset aggiorna gli slider', async ({ page }) => {
+  test('applying a preset updates the sliders', async ({ page }) => {
     await open(page);
     const p0 = (await fetchPresets())[0];
     await page.locator('select').selectOption(p0.id);
     await expect(paramVal(page, 'R₀')).toHaveText(String(p0.params.r0));
   });
 
-  test('slider velocità aggiorna il valore live', async ({ page }) => {
+  test('the speed slider updates the live value', async ({ page }) => {
     await open(page);
     await setRange(speedSlider(page), 15);
     await expect(speedBadge(page)).toHaveText(/15/);
   });
 
-  test('infetti iniziali non scende sotto 1', async ({ page }) => {
+  test('initial infected count does not drop below 1', async ({ page }) => {
     await open(page);
     const seed = page.locator('input[type=number]');
     await seed.fill('0');
@@ -197,25 +219,21 @@ test.describe('parametri', () => {
     await expect(seed).toHaveValue('1');
   });
 
-  test('cambiare tutti i parametri durante la run non rompe nulla', async ({ page }) => {
+  test('changing every parameter during a run breaks nothing', async ({ page }) => {
     await open(page);
     await control([{ type: 'seed', iso: 'USA', count: 100_000 }, { type: 'setSpeed', speed: 30 }, { type: 'play' }]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(10);
-    }).toPass({ timeout: 10_000 });
+    await waitForDay(page, 10, 10_000);
     for (const label of ['R₀', 'Interventi', 'Vaccinazione', 'Letalità', 'Incubazione', 'Durata infettiva', 'Mobilità']) {
       const slider = paramSlider(page, label);
       await setRange(slider, Number(await slider.getAttribute('max')));
     }
     const before = Number(await dayCell(page).textContent());
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(before + 3);
-    }).toPass({ timeout: 10_000 });
+    await waitForDay(page, before + 3, 10_000);
   });
 });
 
 test.describe('timeline', () => {
-  test('scrubbing mette in pausa e raggiunge gli estremi', async ({ page }) => {
+  test('scrubbing pauses playback and reaches the extremes', async ({ page }) => {
     await open(page);
     await runSomeDays(page);
     await setRange(tlSlider(page), 0);
@@ -229,7 +247,7 @@ test.describe('timeline', () => {
     await expect(liveBadge(page)).toBeVisible();
   });
 
-  test('controlli disabilitati durante lo scrubbing', async ({ page }) => {
+  test('controls are disabled while scrubbing', async ({ page }) => {
     await open(page);
     await runSomeDays(page);
     await setRange(tlSlider(page), 0);
@@ -241,7 +259,7 @@ test.describe('timeline', () => {
 });
 
 test.describe('outbreak', () => {
-  test('outbreak fa crescere infetti e curve', async ({ page }) => {
+  test('an outbreak grows the infected count and the curves', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 100_000 },
@@ -254,7 +272,7 @@ test.describe('outbreak', () => {
     expect(Number(await dayCell(page).textContent())).toBeGreaterThan(1);
   });
 
-  test('lockdown globale + mobilità 0 blocca la crescita', async ({ page }) => {
+  test('global lockdown plus zero mobility halts the growth', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 100_000 },
@@ -267,7 +285,7 @@ test.describe('outbreak', () => {
 });
 
 test.describe('country card (canvas)', () => {
-  test('la card si apre, mostra SEIRD+V e si chiude', async ({ page }) => {
+  test('the card opens, shows SEIRD+V and closes', async ({ page }) => {
     await open(page);
     await openCard(page);
     const card = page.locator('.country-card');
@@ -281,7 +299,7 @@ test.describe('country card (canvas)', () => {
     await expect(card).toBeHidden();
   });
 
-  test('sub-header "casi attivi" e semina-da-card', async ({ page }) => {
+  test('sub-header shows "casi attivi" and seeding from the card works', async ({ page }) => {
     await open(page);
     await openCard(page);
     await expect(page.locator('.cc-sub')).toContainText('casi attivi');
@@ -289,7 +307,7 @@ test.describe('country card (canvas)', () => {
     await expect.poll(async () => intOf(ccRow(page, 'Infetti'))).toBeGreaterThan(0);
   });
 
-  test('tooltip metrica (Esp.+Inf.) == Esposti+Infetti della card', async ({ page }) => {
+  test('the metric tooltip (Esp.+Inf.) equals Esposti+Infetti from the card', async ({ page }) => {
     await open(page);
     const pos = await openCard(page);
     await page.locator('.cc-seed').click();
@@ -303,7 +321,7 @@ test.describe('country card (canvas)', () => {
     expect(Math.abs(tipActive - (esposti + infetti))).toBeLessThanOrEqual(1);
   });
 
-  test('lockdown della card disabilitato durante lo scrubbing', async ({ page }) => {
+  test('the card lockdown is disabled while scrubbing', async ({ page }) => {
     await open(page);
     await openCard(page);
     await page.locator('.cc-seed').click();
@@ -316,20 +334,16 @@ test.describe('country card (canvas)', () => {
   });
 });
 
-test.describe('import / export / continuazione', () => {
-  test('esporta poi importa ripristina lo stato', async ({ page }) => {
+test.describe('import / export / continuation', () => {
+  test('export then import restores the state', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 50_000 },
       { type: 'setParams', params: params({ r0: 4 }) },
       { type: 'setSpeed', speed: 30 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(15);
-    }).toPass({ timeout: 12_000 });
-    await page.getByRole('button', { name: /Pausa/ }).click();
-    await page.waitForTimeout(700);
-    const savedDay = await dayCell(page).textContent();
+    await waitForDay(page, 15);
+    const savedDay = await pauseAndReadDay(page);
 
     const [download] = await Promise.all([
       page.waitForEvent('download'),
@@ -340,36 +354,30 @@ test.describe('import / export / continuazione', () => {
     await page.getByRole('button', { name: /Reset/ }).click();
     await expect(dayCell(page)).toHaveText('0');
     await page.locator('input[type=file]').setInputFiles(file);
-    await expect(dayCell(page)).toHaveText(savedDay!);
+    await expect(dayCell(page)).toHaveText(savedDay);
     expect(await intOf(infChip(page))).toBeGreaterThan(0);
 
     await page.getByRole('button', { name: /Avvia/ }).click();
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(Number(savedDay));
-    }).toPass({ timeout: 12_000 });
+    await waitForDay(page, Number(savedDay));
   });
 
-  test('import di un file non valido mostra un alert', async ({ page }) => {
+  test('importing an invalid file shows an alert', async ({ page }) => {
     await open(page);
-    let dialogMsg = '';
-    page.on('dialog', (d) => { dialogMsg = d.message(); void d.accept(); });
-    await page.locator('input[type=file]').setInputFiles({
-      name: 'bad.json', mimeType: 'application/json',
-      buffer: Buffer.from('{"version":1,"frames":[]}'),
-    });
-    await expect.poll(() => dialogMsg).toContain('non valido');
+    const dialogs = captureDialogs(page);
+    await importFile(page, '{"version":1,"frames":[]}', 'bad.json');
+    await expect.poll(() => dialogs.last()).toContain('non valido');
   });
 });
 
-test.describe('totali mondiali', () => {
-  test('la striscia sopra la mappa mostra i 6 compartimenti', async ({ page }) => {
+test.describe('world totals', () => {
+  test('the strip above the map shows the 6 compartments', async ({ page }) => {
     await open(page);
     await expect(page.locator('.world-totals .chip')).toHaveCount(6);
     await control([{ type: 'seed', iso: 'USA', count: 100_000 }, { type: 'step' }]);
     await expect.poll(async () => intOf(infChip(page))).toBeGreaterThan(0);
   });
 
-  test('i totali restano non-negativi e plausibili a velocità alta', async ({ page }) => {
+  test('totals stay non-negative and plausible at high speed', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 500_000 },
@@ -389,7 +397,7 @@ test.describe('totali mondiali', () => {
     await control([{ type: 'pause' }]);
   });
 
-  test('i chip filtrano gli stati mostrati sulla mappa', async ({ page }) => {
+  test('the chips filter the states shown on the map', async ({ page }) => {
     await open(page);
     const infChipBtn = page.locator('.world-totals .chip.i');
     await expect(infChipBtn).toHaveAttribute('aria-pressed', 'true');
@@ -404,8 +412,8 @@ test.describe('totali mondiali', () => {
   });
 });
 
-test.describe('classifica', () => {
-  test('mostra Paesi, cambia metrica e apre la card al click', async ({ page }) => {
+test.describe('leaderboard', () => {
+  test('shows countries, switches metric and opens the card on click', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 200_000 },
@@ -421,25 +429,18 @@ test.describe('classifica', () => {
   });
 });
 
-test.describe('replay su riconnessione', () => {
-  test('un client che si ricollega ricostruisce la timeline fino al giorno 0', async ({ page }) => {
+test.describe('replay on reconnection', () => {
+  test('a reconnecting client rebuilds the timeline back to day 0', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 100_000 },
       { type: 'setSpeed', speed: 30 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(20);
-    }).toPass({ timeout: 12_000 });
-    await page.getByRole('button', { name: /Pausa/ }).click();
-    await page.waitForTimeout(700);
-    const day = Number(await dayCell(page).textContent());
+    await waitForDay(page, 20);
+    const day = Number(await pauseAndReadDay(page));
 
     await page.reload();
-    await page.locator('vite-error-overlay').waitFor({ state: 'detached', timeout: 60_000 })
-      .catch(() => undefined);
-    await expect(page.locator('.status')).toHaveClass(/on/);
-    await page.waitForTimeout(1500);
+    await waitForReady(page);
     await expect(async () => {
       expect(Number(await dayCell(page).textContent())).toBe(day);
     }).toPass({ timeout: 8_000 });
@@ -450,96 +451,77 @@ test.describe('replay su riconnessione', () => {
   });
 });
 
-test.describe('backup automatico', () => {
-  test('GET /api/backup riflette la run ed è importabile dalla UI', async ({ page }) => {
+test.describe('automatic backup', () => {
+  test('GET /api/backup reflects the run and is importable from the UI', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 80_000 },
       { type: 'setSpeed', speed: 30 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(10);
-    }).toPass({ timeout: 12_000 });
+    await waitForDay(page, 10);
     await control([{ type: 'pause' }]);
     await page.waitForTimeout(500);
     const savedDay = await dayCell(page).textContent();
 
+    const { saveVersion } = await getJson('/api/config');
     const state = await getJson('/api/backup');
-    expect(state.version).toBe(4);
+    expect(state.version).toBe(saveVersion);
     expect(state.frames.length).toBeGreaterThan(5);
     const lastDay = state.frames[state.frames.length - 1].day;
     expect(String(lastDay)).toBe(savedDay);
 
     await page.getByRole('button', { name: /Reset/ }).click();
     await expect(dayCell(page)).toHaveText('0');
-    await page.locator('input[type=file]').setInputFiles({
-      name: 'backup.json', mimeType: 'application/json',
-      buffer: Buffer.from(JSON.stringify(state)),
-    });
+    await importFile(page, JSON.stringify(state), 'backup.json');
     await expect(dayCell(page)).toHaveText(String(lastDay));
     expect(await intOf(infChip(page))).toBeGreaterThan(0);
   });
 });
 
-test.describe('compatibilità formato salvataggio', () => {
-  test('una versione non supportata (v3) viene rifiutata anche con frame validi', async ({
+test.describe('save format compatibility', () => {
+  test('an unsupported (older) save version is rejected even with valid frames', async ({
     page,
   }) => {
-    let dialog = '';
-    page.on('dialog', (d) => {
-      dialog = d.message();
-      void d.accept();
-    });
+    const dialogs = captureDialogs(page);
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 40_000 },
       { type: 'setSpeed', speed: 30 },
       { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(8);
-    }).toPass({ timeout: 12_000 });
+    await waitForDay(page, 8);
     await page.getByRole('button', { name: /Pausa/ }).click();
     await page.waitForTimeout(700);
 
-    const v4 = await readDownload(page, () =>
+    const { saveVersion } = await getJson('/api/config');
+    const exported = await readDownload(page, () =>
       page.getByRole('button', { name: /Esporta/ }).click(),
     );
-    const v3 = JSON.stringify({ version: 3, frames: v4.frames });
+    const unsupported = JSON.stringify({ version: saveVersion - 1, frames: exported.frames });
 
     await page.getByRole('button', { name: /Reset/ }).click();
     await expect(dayCell(page)).toHaveText('0');
-    await page.locator('input[type=file]').setInputFiles({
-      name: 'v3.json',
-      mimeType: 'application/json',
-      buffer: Buffer.from(v3),
-    });
-    await expect.poll(() => dialog).toContain('non valido');
+    await importFile(page, unsupported, 'unsupported.json');
+    await expect.poll(() => dialogs.last()).toContain('non valido');
     await expect(dayCell(page)).toHaveText('0');
   });
 
-  test('import malformati (non-JSON e shape errata) mostrano un alert', async ({ page }) => {
+  test('malformed imports (non-JSON and wrong shape) show an alert', async ({ page }) => {
     await open(page);
-    const msgs: string[] = [];
-    page.on('dialog', (d) => { msgs.push(d.message()); void d.accept(); });
-    const file = page.locator('input[type=file]');
+    const dialogs = captureDialogs(page);
 
-    await file.setInputFiles({
-      name: 'a.json', mimeType: 'application/json', buffer: Buffer.from('definitely not json'),
-    });
-    await expect.poll(() => msgs.length).toBeGreaterThan(0);
+    await importFile(page, 'definitely not json', 'a.json');
+    await expect.poll(() => dialogs.messages.length).toBeGreaterThan(0);
 
-    await file.setInputFiles({
-      name: 'b.json', mimeType: 'application/json', buffer: Buffer.from('{"hello":"world"}'),
-    });
-    await expect.poll(() => msgs.length).toBeGreaterThan(1);
-    expect(msgs.every((m) => /non valido/i.test(m))).toBe(true);
+    await importFile(page, '{"hello":"world"}', 'b.json');
+    await expect.poll(() => dialogs.messages.length).toBeGreaterThan(1);
+    expect(dialogs.messages.every((m) => /non valido/i.test(m))).toBe(true);
     await expect(dayCell(page)).toHaveText('0');
   });
 });
 
-test.describe('coerenza dei dati', () => {
-  test('la popolazione mondiale si conserva (somma dei 6 chip ~ costante)', async ({ page }) => {
+test.describe('data consistency', () => {
+  test('the world population is conserved (sum of the 6 chips stays ~constant)', async ({ page }) => {
     await open(page);
     await page.waitForTimeout(1300);
     const base = await chipSum(page);
@@ -550,9 +532,7 @@ test.describe('coerenza dei dati', () => {
       { type: 'setParams', params: params({ r0: 4, fatality_rate: 0.05 }) },
       { type: 'setSpeed', speed: 40 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(25);
-    }).toPass({ timeout: 14_000 });
+    await waitForDay(page, 25, 14_000);
     await control([{ type: 'pause' }]);
     await page.waitForTimeout(1400);
 
@@ -561,26 +541,20 @@ test.describe('coerenza dei dati', () => {
     }).toBeLessThan(0.005);
   });
 
-  test('dopo un import si può scrubbare tutta la timeline fino al giorno 0', async ({ page }) => {
+  test('after an import the whole timeline can be scrubbed back to day 0', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'BRA', count: 60_000 },
       { type: 'setSpeed', speed: 30 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(18);
-    }).toPass({ timeout: 12_000 });
-    await page.getByRole('button', { name: /Pausa/ }).click();
-    await page.waitForTimeout(500);
-    const day = await dayCell(page).textContent();
+    await waitForDay(page, 18);
+    const day = await pauseAndReadDay(page, 500);
     const v = await readDownload(page, () =>
       page.getByRole('button', { name: /Esporta/ }).click());
     await page.getByRole('button', { name: /Reset/ }).click();
     await expect(dayCell(page)).toHaveText('0');
-    await page.locator('input[type=file]').setInputFiles({
-      name: 'state.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(v)),
-    });
-    await expect(dayCell(page)).toHaveText(day!);
+    await importFile(page, JSON.stringify(v), 'state.json');
+    await expect(dayCell(page)).toHaveText(day);
     await setRange(tlSlider(page), 0);
     await expect(dayCell(page)).toHaveText('0');
     await page.getByRole('button', { name: /Live/ }).click();
@@ -588,15 +562,13 @@ test.describe('coerenza dei dati', () => {
   });
 });
 
-test.describe('resync su salto indietro', () => {
-  test('il client riallinea coerentemente se il motore torna a un giorno precedente', async ({
+test.describe('resync on backward jump', () => {
+  test('the client realigns consistently when the engine jumps back to an earlier day', async ({
     page,
   }) => {
     await open(page);
     await runSomeDays(page, 22);
-    await page.getByRole('button', { name: /Pausa/ }).click();
-    await page.waitForTimeout(500);
-    const localDay = Number(await dayCell(page).textContent());
+    const localDay = Number(await pauseAndReadDay(page, 500));
     expect(localDay).toBeGreaterThan(20);
 
     await postScenario({
@@ -618,8 +590,8 @@ test.describe('resync su salto indietro', () => {
   });
 });
 
-test.describe('stato condiviso multi-client', () => {
-  test('due client connessi vedono lo stesso giorno', async ({ page, context }) => {
+test.describe('shared multi-client state', () => {
+  test('two connected clients see the same day', async ({ page, context }) => {
     await open(page);
     const p2 = await context.newPage();
     await open(p2);
@@ -627,9 +599,7 @@ test.describe('stato condiviso multi-client', () => {
       { type: 'seed', iso: 'USA', count: 100_000 },
       { type: 'setSpeed', speed: 25 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(10);
-    }).toPass({ timeout: 12_000 });
+    await waitForDay(page, 10);
     const d1 = Number(await dayCell(page).textContent());
     const d2 = Number(await dayCell(p2).textContent());
     expect(Math.abs(d1 - d2)).toBeLessThanOrEqual(3);
@@ -638,8 +608,8 @@ test.describe('stato condiviso multi-client', () => {
   });
 });
 
-test.describe('classifica e grafici (dettaglio)', () => {
-  test('classifica: medaglia, sparkline e cambio metrica riordina', async ({ page }) => {
+test.describe('leaderboard and charts (detail)', () => {
+  test('leaderboard: medal, sparkline and metric switch re-sorts', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 300_000 },
@@ -658,7 +628,7 @@ test.describe('classifica e grafici (dettaglio)', () => {
     await control([{ type: 'pause' }]);
   });
 
-  test('il grafico a curve si popola durante la run', async ({ page }) => {
+  test('the curve chart fills in during the run', async ({ page }) => {
     await open(page);
     await expect(page.locator('.chart canvas').first()).toBeVisible();
     await control([
@@ -672,15 +642,13 @@ test.describe('classifica e grafici (dettaglio)', () => {
     await control([{ type: 'pause' }]);
   });
 
-  test('la card aperta dalla classifica mostra la sparkline dei casi attivi', async ({ page }) => {
+  test('the card opened from the leaderboard shows the active-cases sparkline', async ({ page }) => {
     await open(page);
     await control([
       { type: 'seed', iso: 'USA', count: 250_000 },
       { type: 'setSpeed', speed: 30 }, { type: 'play' },
     ]);
-    await expect(async () => {
-      expect(Number(await dayCell(page).textContent())).toBeGreaterThan(12);
-    }).toPass({ timeout: 12_000 });
+    await waitForDay(page, 12);
     await control([{ type: 'pause' }]);
     await page.locator('.lb-row').first().click();
     await expect(page.locator('.country-card')).toBeVisible();
@@ -688,8 +656,8 @@ test.describe('classifica e grafici (dettaglio)', () => {
   });
 });
 
-test.describe('filtri mappa (dettaglio)', () => {
-  test('non si possono spegnere tutti i filtri: almeno uno resta attivo', async ({ page }) => {
+test.describe('map filters (detail)', () => {
+  test('not all filters can be turned off: at least one stays active', async ({ page }) => {
     await open(page);
     const eChip = page.locator('.world-totals .chip.e');
     const iChip = page.locator('.world-totals .chip.i');
@@ -702,7 +670,7 @@ test.describe('filtri mappa (dettaglio)', () => {
     await expect(iChip).toHaveAttribute('aria-pressed', 'true');
   });
 
-  test('il filtro attivo cambia la metrica del tooltip della mappa', async ({ page }) => {
+  test('the active filter changes the map tooltip metric', async ({ page }) => {
     await open(page);
     const pos = await openCard(page);
     await page.locator('.cc-seed').click();

@@ -13,23 +13,24 @@ The domain logic lives in :mod:`app.simulation` and the wire schemas in
 
     uv run uvicorn app.main:app --reload --port 8000
 
-Client -> server WebSocket commands (JSON):
-    {"type": "play"}                              # start auto-advancing
-    {"type": "pause"}                             # stop auto-advancing
-    {"type": "reset"}                             # back to day 0, empty world
-    {"type": "step"}                              # advance exactly one day
-    {"type": "seed", "iso": "USA", "count": 100}  # start an outbreak
-    {"type": "setParams", "params": { ... }}      # live parameter tuning
-    {"type": "setSpeed", "speed": 10}             # steps per second
-    {"type": "setCountryIntervention", "iso": "ITA", "value": 0.6}  # per-country lockdown
-    {"type": "getHistory"}                        # request the per-day totals series
+Client -> server WebSocket commands, each a JSON message followed by its effect:
+    {"type": "play"}                              start auto-advancing
+    {"type": "pause"}                             stop auto-advancing
+    {"type": "reset"}                             back to day 0, empty world
+    {"type": "step"}                              advance exactly one day
+    {"type": "seed", "iso": "USA", "count": 100}  start an outbreak
+    {"type": "setParams", "params": { ... }}      live parameter tuning
+    {"type": "setSpeed", "speed": 10}             steps per second
+    {"type": "setCountryIntervention", "iso": "ITA", "value": 0.6}  per-country lockdown
+    {"type": "getHistory"}                        request the per-day totals series
 
 Every simulated day is also persisted incrementally to ``backups/backup.ndjson``
 (see :mod:`app.backup`); the server recovers from it on startup and exposes it as
 a downloadable ``SavedState`` at ``GET /api/backup``.
 
 Server -> client: {"type": "snapshot", ...Snapshot} (one frame of world state),
-or {"type": "history", "points": [...]} in reply to a ``getHistory`` request.
+or {"type": "history", "points": [...], "frames": {...}} in reply to a
+``getHistory`` request (the per-day totals series plus the columnar timeline).
 """
 
 from __future__ import annotations
@@ -97,9 +98,15 @@ async def sim_loop(engine: SimulationEngine, manager: ConnectionManager) -> None
     """
     while True:
         if engine.running and manager.active:
-            engine.step()
-            await manager.broadcast_snapshot(engine)
-            await asyncio.sleep(1.0 / engine.speed)
+            try:
+                engine.step()
+                await manager.broadcast_snapshot(engine)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(0.5)
+            else:
+                await asyncio.sleep(1.0 / engine.speed)
         else:
             await asyncio.sleep(0.1)
 
@@ -134,7 +141,9 @@ async def _handle_command(
     elif cmd == "setSpeed":
         engine.set_speed(float(msg.get("speed", config.SPEED_DEFAULT)))
     elif cmd == "setCountryIntervention":
-        engine.set_country_intervention(msg.get("iso", ""), float(msg.get("value", 0)))
+        engine.set_country_intervention(
+            msg.get("iso", ""), float(msg.get("value", config.LOCKDOWN_DEFAULT))
+        )
     else:
         return
 
@@ -181,6 +190,10 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="AlphaGen Epidemic Simulator", lifespan=lifespan)
@@ -287,8 +300,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 msg = await ws.receive_json()
             except WebSocketDisconnect:
                 break
-            except Exception:
+            except json.JSONDecodeError:
                 continue
+            except Exception:
+                break
             if isinstance(msg, dict) and msg.get("type") == "getHistory":
                 try:
                     await ws.send_json(

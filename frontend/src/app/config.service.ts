@@ -2,7 +2,7 @@ import { HttpClient } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
-import { API_BASE } from './config';
+import { API_BASE, CONFIG_RETRY_ATTEMPTS, CONFIG_RETRY_DELAY_MS } from './config';
 import { AppConfig, Params, ParamSpec } from './models';
 
 /** Merged slider descriptor: numeric spec (backend) + UI copy (frontend). */
@@ -30,13 +30,14 @@ export class ConfigService {
   private cfg?: AppConfig;
 
   /** Fetch the config, retrying while the backend is still coming up. */
-  async load(attempts = 8, delayMs = 1000): Promise<void> {
-    for (let i = 0; i < attempts; i++) {
+  async load(attempts = CONFIG_RETRY_ATTEMPTS, delayMs = CONFIG_RETRY_DELAY_MS): Promise<void> {
+    const total = Math.max(1, attempts);
+    for (let i = 0; i < total; i++) {
       try {
         this.cfg = await firstValueFrom(this.http.get<AppConfig>(`${API_BASE}/api/config`));
         return;
       } catch (err) {
-        if (i === attempts - 1) throw err;
+        if (i === total - 1) throw err;
         await new Promise((r) => setTimeout(r, delayMs));
       }
     }
@@ -85,9 +86,9 @@ export class ConfigService {
 
   /** Default parameter set, built from the config defaults. */
   get defaultParams(): Params {
-    const out = {} as Record<string, number>;
-    for (const p of this.config.params) out[p.key] = p.default;
-    return out as unknown as Params;
+    return Object.fromEntries(
+      this.config.params.map((p) => [p.key, p.default]),
+    ) as unknown as Params;
   }
 
   /** Compartments composing the default map heat metric. */

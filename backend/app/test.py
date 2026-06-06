@@ -93,6 +93,16 @@ def assert_monotonic_cumulative(prev: dict, totals: dict, tol: float = 1.0) -> N
         )
 
 
+def country(countries: list[dict], iso: str) -> dict:
+    """Return the single country dict with the given iso from a countries list."""
+    return next(c for c in countries if c["iso"] == iso)
+
+
+def comp(countries: list[dict], iso: str, key: str):
+    """Return one compartment value of a country from a countries list."""
+    return country(countries, iso)[key]
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -212,9 +222,17 @@ def rand_params(rng: random.Random) -> Params:
     return Params(**{k: rng.uniform(lo, hi) for k, (lo, hi) in ranges.items()})
 
 
+def _compartment_sum(m: SeirModel) -> np.ndarray:
+    return m.S + m.E + m.I + m.R + m.D + m.V
+
+
+def _total_pop(m: SeirModel) -> float:
+    return float(_compartment_sum(m).sum())
+
+
 def drift(engine: SimulationEngine) -> float:
     m = engine.model
-    return float(np.max(np.abs((m.S + m.E + m.I + m.R + m.D + m.V) - m.N)))
+    return float(np.max(np.abs(_compartment_sum(m) - m.N)))
 
 
 def engine_ok(engine: SimulationEngine, tol: float = 5.0) -> bool:
@@ -336,26 +354,12 @@ class TestEngine:
     )
     def test_extreme_params_conservative(self, small_model, params):
         small_model.seed(0, 100_000)
-        before = (
-            small_model.S
-            + small_model.E
-            + small_model.I
-            + small_model.R
-            + small_model.D
-            + small_model.V
-        ).sum()
+        before = _total_pop(small_model)
         for _ in range(15):
             small_model.step(params)
             for arr in (small_model.S, small_model.E, small_model.I):
                 assert (arr >= -1e-6).all()
-        after = (
-            small_model.S
-            + small_model.E
-            + small_model.I
-            + small_model.R
-            + small_model.D
-            + small_model.V
-        ).sum()
+        after = _total_pop(small_model)
         assert abs(after - before) < 1e-2
 
     def test_country_lockdown_dampens(self):
@@ -375,7 +379,14 @@ class TestEngine:
         engine.set_country_intervention("ITA", 0.6)
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(0.6)
 
-    @pytest.mark.parametrize("v,exp", [(1.5, 1.0), (-1.0, 0.0), (0.3, 0.3)])
+    @pytest.mark.parametrize(
+        "v,exp",
+        [
+            (app_config.LOCKDOWN_MAX + 0.5, app_config.LOCKDOWN_MAX),
+            (app_config.LOCKDOWN_MIN - 1.0, app_config.LOCKDOWN_MIN),
+            (0.3, 0.3),
+        ],
+    )
     def test_intervention_clamp(self, engine, v, exp):
         engine.set_country_intervention("ITA", v)
         assert engine.model.C[engine.index["ITA"]] == pytest.approx(exp)
@@ -415,8 +426,16 @@ class TestEngine:
 
     def test_apply_scenario_variants(self, engine):
         engine.apply_scenario({"countries": [{"iso": "ZZZ", "i": 5}]})
-        engine.apply_scenario({"countries": [{"iso": "ITA", "intervention": 5.0}]})
-        assert engine.model.C[engine.index["ITA"]] == pytest.approx(1.0)
+        engine.apply_scenario(
+            {
+                "countries": [
+                    {"iso": "ITA", "intervention": app_config.LOCKDOWN_MAX + 4.0}
+                ]
+            }
+        )
+        assert engine.model.C[engine.index["ITA"]] == pytest.approx(
+            app_config.LOCKDOWN_MAX
+        )
         engine.apply_scenario({"params": {"r0": 9.0}})
         assert engine.params.r0 == 9.0
         assert engine.params.infectious_days == Params().infectious_days
@@ -623,6 +642,94 @@ class TestConnectionManager:
 
 
 @pytest.mark.unit
+class TestSimLoop:
+    async def test_loop_survives_step_exception_and_keeps_advancing(self, monkeypatch):
+        """Regression: a transient failure in ``step``/``broadcast`` must not kill
+        the auto-advance task — the loop backs off and keeps stepping rather than
+        dying for the whole app lifetime."""
+        import asyncio
+
+        import app.main as main_mod
+        from app.main import sim_loop
+
+        class FakeEngine:
+            running = True
+            speed = 1000.0
+
+            def __init__(self):
+                self.steps = 0
+
+            def step(self):
+                self.steps += 1
+                if self.steps == 1:
+                    raise RuntimeError("transient step failure")
+
+        class FakeManager:
+            def __init__(self):
+                self.active = {object()}
+                self.broadcasts = 0
+
+            async def broadcast_snapshot(self, engine):
+                self.broadcasts += 1
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(delay):
+            await real_sleep(min(delay, 0.01))
+
+        monkeypatch.setattr(main_mod.asyncio, "sleep", fast_sleep)
+
+        engine, manager = FakeEngine(), FakeManager()
+        task = asyncio.create_task(sim_loop(engine, manager))
+        try:
+            async with asyncio.timeout(5.0):
+                while manager.broadcasts < 2:
+                    await real_sleep(0.01)
+            assert not task.done(), "sim_loop died on a step exception"
+            assert engine.steps >= 3 and manager.broadcasts >= 2
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_loop_idles_without_clients_or_when_paused(self):
+        """The loop must not step when paused or when no client is connected."""
+        import asyncio
+
+        from app.main import sim_loop
+
+        class FakeEngine:
+            speed = 1000.0
+
+            def __init__(self):
+                self.running = False
+                self.steps = 0
+
+            def step(self):
+                self.steps += 1
+
+        class FakeManager:
+            def __init__(self):
+                self.active = set()
+
+            async def broadcast_snapshot(self, engine):
+                pass
+
+        engine, manager = FakeEngine(), FakeManager()
+        task = asyncio.create_task(sim_loop(engine, manager))
+        try:
+            await asyncio.sleep(0.05)
+            assert engine.steps == 0
+            manager.active.add(object())
+            await asyncio.sleep(0.05)
+            assert engine.steps == 0
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.unit
 class TestValidation:
     @pytest.mark.parametrize("field,bounds", VALIDATION_BOUNDS.items())
     def test_bounds(self, field, bounds):
@@ -678,9 +785,8 @@ class TestStability:
                     "d": float(m.D.sum()),
                     "v": float(m.V.sum()),
                 }
-                for k in "rdv":
-                    assert tot[k] + 1.0 >= prev[k]
-                    prev[k] = tot[k]
+                assert_monotonic_cumulative(prev, tot)
+                prev = tot
         active = float((e.model.E + e.model.I).sum())
         assert active < e.model.N.sum() * 1e-3
 
@@ -957,7 +1063,7 @@ class TestBackup:
         dst.apply_scenario(scen)
         assert dst.day == 25
         for iso in ("USA", "BRA"):
-            want = next(c["i"] for c in scen["countries"] if c["iso"] == iso)
+            want = comp(scen["countries"], iso, "i")
             assert dst.model.I[dst.index[iso]] == pytest.approx(want)
         assert dst.model.I.sum() > 0
         dst.step()
@@ -976,7 +1082,7 @@ class TestBackup:
         b = self._engine(path)
         b.apply_scenario(recovered)
         assert b.day == 30
-        usa_i = next(c["i"] for c in recovered["countries"] if c["iso"] == "USA")
+        usa_i = comp(recovered["countries"], "USA", "i")
         assert usa_i > 0
         assert b.model.I[b.index["USA"]] == pytest.approx(usa_i)
         assert [f["day"] for f in backup_mod.load_saved_state(path)["frames"]] == [30]
@@ -1005,6 +1111,52 @@ class TestBackup:
         state = backup_mod.load_saved_state(path)
         assert [f["day"] for f in state["frames"]] == [0, 1, 2, 3]
 
+    def test_frame_with_missing_or_non_numeric_day_is_skipped(self, tmp_path):
+        """Regression: a frame line that is valid JSON but lacks a numeric "day"
+        must be skipped (not crash recovery with KeyError/TypeError)."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        for _ in range(3):
+            e.step()
+        with path.open("a", encoding="utf-8") as f:
+            f.write('{"kind": "frame", "s": [1, 2, 3]}\n')
+            f.write('{"kind": "frame", "day": "oops", "s": [1, 2, 3]}\n')
+        state = backup_mod.load_saved_state(path)
+        assert [f["day"] for f in state["frames"]] == [0, 1, 2, 3]
+
+    def test_frame_with_mismatched_column_length_is_skipped(self, tmp_path):
+        """Regression: a frame whose compartment columns are shorter than the
+        header's country list must be skipped (not crash recovery with
+        IndexError)."""
+        path = tmp_path / "b.ndjson"
+        e = self._engine(path)
+        for _ in range(3):
+            e.step()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(
+                '{"kind": "frame", "day": 4, "speed": 5, "params": {}, '
+                '"s": [1], "e": [0], "i": [0], "r": [0], "d": [0], '
+                '"v": [0], "c": [0]}\n'
+            )
+        state = backup_mod.load_saved_state(path)
+        assert [f["day"] for f in state["frames"]] == [0, 1, 2, 3]
+
+    def test_partial_header_treated_as_absent(self, tmp_path):
+        """Regression: a header line that parses as JSON but lacks the
+        ``name``/``population`` columns (half-written on crash, or an older
+        truncated segment) must be treated as absent — recovery falls back to
+        *no backup* (``None``) instead of crashing with KeyError/IndexError."""
+        path = tmp_path / "b.ndjson"
+        path.write_text(
+            '{"kind": "header", "version": %d, "iso": ["USA", "CHN"]}\n'
+            '{"kind": "frame", "day": 0, "speed": 5, "params": {}, '
+            '"s": [1, 2], "e": [0, 0], "i": [0, 0], "r": [0, 0], '
+            '"d": [0, 0], "v": [0, 0], "c": [0, 0]}\n' % SAVE_VERSION,
+            encoding="utf-8",
+        )
+        assert backup_mod.load_saved_state(path) is None
+        assert backup_mod.load_scenario(path) is None
+
     def test_missing_file_is_none(self, tmp_path):
         missing = tmp_path / "nope.ndjson"
         assert backup_mod.load_scenario(missing) is None
@@ -1019,7 +1171,7 @@ class TestBackup:
         e.seed("USA", 4000)
         state = backup_mod.load_saved_state(path)
         assert [f["day"] for f in state["frames"]] == [0]
-        usa = next(c for c in state["frames"][0]["countries"] if c["iso"] == "USA")
+        usa = country(state["frames"][0]["countries"], "USA")
         assert usa["i"] == 5000
 
     def test_load_saved_state_caps_to_retention(self, tmp_path, monkeypatch):
@@ -1242,6 +1394,15 @@ class TestWebSocket:
             assert s["type"] == "snapshot"
             check_snapshot(s)
 
+    async def test_malformed_message_is_ignored(self, ws_url):
+        """Regression: a non-JSON message from a live client is ignored and the
+        connection stays open and responsive (no busy-loop, no drop)."""
+        async with ws_connect(ws_url) as ws:
+            await ws.recv()
+            await ws.send_raw("not json {{{")
+            s = await ws.command({"type": "step"})
+            assert s["type"] == "snapshot" and s["day"] == 1
+
     async def test_get_history_replay(self, ws_url):
         async with ws_connect(ws_url) as ws:
             await ws.recv()
@@ -1262,9 +1423,10 @@ class TestWebSocket:
         async with ws_connect(ws_url) as a, ws_connect(ws_url) as b:
             await asyncio.sleep(0.2)
             await a.send({"type": "seed", "iso": "USA", "count": 1234})
-            pred = lambda s: any(
-                c["iso"] == "USA" and c["i"] >= 1234 for c in s["countries"]
-            )
+
+            def pred(s):
+                return any(c["iso"] == "USA" and c["i"] >= 1234 for c in s["countries"])
+
             sa = await recv_until(a, pred)
             sb = await recv_until(b, pred)
             assert sa["day"] == sb["day"]
@@ -1307,13 +1469,11 @@ class TestWebSocket:
         async with ws_connect(ws_url) as ws:
             await ws.recv()
             s = await ws.command({"type": "seed", "iso": "USA", "count": 1000})
-            assert next(c for c in s["countries"] if c["iso"] == "USA")[
-                "i"
-            ] == pytest.approx(1000)
+            assert comp(s["countries"], "USA", "i") == pytest.approx(1000)
             s = await ws.command({"type": "seed", "iso": "USA"})
-            assert next(c for c in s["countries"] if c["iso"] == "USA")[
-                "i"
-            ] == pytest.approx(1100)
+            assert comp(s["countries"], "USA", "i") == pytest.approx(
+                1000 + app_config.SEED_DEFAULT
+            )
             s = await ws.command({"type": "seed", "iso": "ZZZ", "count": 100})
             check_snapshot(s)
 
@@ -1322,7 +1482,7 @@ class TestWebSocket:
             await ws.recv()
             s = await ws.command({"type": "seed", "iso": "USA", "count": -500})
             check_snapshot(s)
-            usa = next(c for c in s["countries"] if c["iso"] == "USA")
+            usa = country(s["countries"], "USA")
             assert usa["i"] >= 0 and usa["s"] <= usa["population"]
             await ws.send({"type": "seed", "iso": "USA", "count": "abc"})
             check_snapshot(await ws.command({"type": "step"}))
@@ -1370,16 +1530,21 @@ class TestWebSocket:
                 "speed"
             ] == pytest.approx(exp)
 
-    @pytest.mark.parametrize("value,exp", [(0.6, 0.6), (1.5, 1.0), (-1.0, 0.0)])
+    @pytest.mark.parametrize(
+        "value,exp",
+        [
+            (0.6, 0.6),
+            (app_config.LOCKDOWN_MAX + 0.5, app_config.LOCKDOWN_MAX),
+            (app_config.LOCKDOWN_MIN - 1.0, app_config.LOCKDOWN_MIN),
+        ],
+    )
     async def test_country_intervention(self, ws_url, value, exp):
         async with ws_connect(ws_url) as ws:
             await ws.recv()
             s = await ws.command(
                 {"type": "setCountryIntervention", "iso": "ITA", "value": value}
             )
-            assert next(c for c in s["countries"] if c["iso"] == "ITA")[
-                "intervention"
-            ] == pytest.approx(exp)
+            assert comp(s["countries"], "ITA", "intervention") == pytest.approx(exp)
 
     async def test_robustness(self, ws_url):
         async with ws_connect(ws_url) as ws:
@@ -1518,7 +1683,7 @@ class TestBackupRest:
         days = [f["day"] for f in state["frames"]]
         assert days[0] == 0 and days[-1] == 6
         assert all(len(f["countries"]) == N_COUNTRIES for f in state["frames"])
-        usa = next(c for c in state["frames"][-1]["countries"] if c["iso"] == "USA")
+        usa = country(state["frames"][-1]["countries"], "USA")
         assert usa["i"] >= 1
 
     def test_backup_reimportable_as_scenario(self, client):

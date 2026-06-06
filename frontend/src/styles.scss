@@ -1,17 +1,21 @@
 :root {
   --bg: #0a0e16;
+  --bg-rgb: 10 14 22;
   --bg-2: #0e1422;
+  --bg-2-rgb: 14 20 34;
   --panel: rgba(22, 29, 44, 0.72);
   --panel-solid: #161d2c;
   --panel-2: rgba(30, 39, 58, 0.6);
   --border: rgba(120, 140, 175, 0.16);
   --border-strong: rgba(120, 140, 175, 0.32);
+  --border-rgb: 120 140 175;
   --text: #eef2f9;
   --muted: #93a0b8;
   --faint: #5f6c82;
 
   --accent: #5b9dff;
-  --accent-2: #a855f7;
+  --accent-rgb: 91 157 255;
+  --accent-2-rgb: 168 85 247;
   --accent-grad: linear-gradient(135deg, #5b9dff 0%, #8b5cf6 100%);
 
   --track: rgba(120, 140, 175, 0.18);
@@ -19,14 +23,40 @@
   --c-s: #38bdf8;
   --c-e: #fbbf24;
   --c-i: #f43f5e;
+  --c-i-rgb: 244 63 94;
   --c-r: #34d399;
+  --c-r-rgb: 52 211 153;
   --c-d: #94a3b8;
+  --c-d-rgb: 148 163 184;
   --c-v: #a78bfa;
+
+  --surface-tooltip-rgb: 16 22 36;
+  --seed-rgb: 250 193 39;
+  --orange-rgb: 243 113 32;
 
   --radius: 16px;
   --radius-sm: 10px;
   --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.65);
-  --shadow-glow: 0 0 0 1px rgba(91, 157, 255, 0.25), 0 8px 24px -8px rgba(91, 157, 255, 0.35);
+  --shadow-glow:
+    0 0 0 1px rgb(var(--accent-rgb) / 25%), 0 8px 24px -8px rgb(var(--accent-rgb) / 35%);
+}
+
+@mixin mono($w, $s) {
+  font:
+    $w #{$s} 'JetBrains Mono',
+    monospace;
+}
+
+%spark-path {
+  fill: none;
+  stroke: var(--c-i);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+%accent-pill {
+  background: rgb(var(--accent-rgb) / 10%);
+  border: 1px solid rgb(var(--accent-rgb) / 20%);
 }
 
 * {
@@ -52,9 +82,9 @@ body {
 
 body {
   background:
-    radial-gradient(1200px 800px at 18% -10%, rgba(91, 157, 255, 0.16), transparent 55%),
-    radial-gradient(1000px 700px at 100% 0%, rgba(168, 85, 247, 0.14), transparent 50%),
-    radial-gradient(900px 900px at 50% 120%, rgba(244, 63, 94, 0.08), transparent 60%),
+    radial-gradient(1200px 800px at 18% -10%, rgb(var(--accent-rgb) / 16%), transparent 55%),
+    radial-gradient(1000px 700px at 100% 0%, rgb(var(--accent-2-rgb) / 14%), transparent 50%),
+    radial-gradient(900px 900px at 50% 120%, rgb(var(--c-i-rgb) / 8%), transparent 60%),
     linear-gradient(180deg, var(--bg-2), var(--bg));
   background-attachment: fixed;
 }
@@ -64,13 +94,13 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(120, 140, 175, 0.25);
+  background: rgb(var(--border-rgb) / 25%);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(120, 140, 175, 0.4);
+  background: rgb(var(--border-rgb) / 40%);
   background-clip: padding-box;
 }
 
@@ -87,7 +117,7 @@ header {
   align-items: center;
   gap: 12px;
   padding: 14px 22px;
-  background: linear-gradient(180deg, rgba(14, 20, 34, 0.85), rgba(14, 20, 34, 0.5));
+  background: linear-gradient(180deg, rgb(var(--bg-2-rgb) / 85%), rgb(var(--bg-2-rgb) / 50%));
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
 
@@ -116,7 +146,7 @@ header {
     padding: 7px 13px;
     border-radius: 999px;
     border: 1px solid var(--border);
-    background: rgba(148, 163, 184, 0.08);
+    background: rgb(var(--c-d-rgb) / 8%);
 
     &::before {
       content: '';
@@ -129,8 +159,8 @@ header {
 
     &.on {
       color: var(--c-r);
-      border-color: rgba(52, 211, 153, 0.3);
-      background: rgba(52, 211, 153, 0.1);
+      border-color: rgb(var(--c-r-rgb) / 30%);
+      background: rgb(var(--c-r-rgb) / 10%);
       &::before {
         background: var(--c-r);
         animation: pulse 2s infinite;
@@ -141,20 +171,20 @@ header {
 
 @keyframes pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5);
+    box-shadow: 0 0 0 0 rgb(var(--c-r-rgb) / 50%);
   }
   70% {
-    box-shadow: 0 0 0 7px rgba(52, 211, 153, 0);
+    box-shadow: 0 0 0 7px rgb(var(--c-r-rgb) / 0%);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0);
+    box-shadow: 0 0 0 0 rgb(var(--c-r-rgb) / 0%);
   }
 }
 
 .logo {
   width: 26px;
   height: 26px;
-  filter: drop-shadow(0 2px 6px rgba(244, 63, 94, 0.45));
+  filter: drop-shadow(0 2px 6px rgb(var(--c-i-rgb) / 45%));
 }
 
 main {
@@ -257,7 +287,7 @@ main {
 }
 
 .leaflet-control-attribution {
-  background: rgba(10, 14, 22, 0.6) !important;
+  background: rgb(var(--bg-rgb) / 60%) !important;
   color: var(--faint) !important;
   font-size: 10px;
   backdrop-filter: blur(4px);
@@ -268,7 +298,7 @@ main {
 }
 
 .leaflet-tooltip {
-  background: rgba(16, 22, 36, 0.95);
+  background: rgb(var(--surface-tooltip-rgb) / 95%);
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
@@ -293,7 +323,7 @@ main {
   bottom: 26px;
   right: 14px;
   z-index: 1000;
-  background: rgba(14, 20, 34, 0.82);
+  background: rgb(var(--bg-2-rgb) / 82%);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -322,8 +352,8 @@ main {
       rgb(40, 11, 84),
       rgb(121, 28, 110),
       rgb(190, 55, 82),
-      rgb(243, 113, 32),
-      rgb(250, 193, 39)
+      rgb(var(--orange-rgb)),
+      rgb(var(--seed-rgb))
     );
   }
 
@@ -359,7 +389,7 @@ main {
   left: 14px;
   z-index: 1000;
   width: 244px;
-  background: rgba(14, 20, 34, 0.92);
+  background: rgb(var(--bg-2-rgb) / 92%);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-strong);
   border-radius: 14px;
@@ -389,13 +419,13 @@ main {
     height: 22px;
     border: none;
     border-radius: 7px;
-    background: rgba(148, 163, 184, 0.12);
+    background: rgb(var(--c-d-rgb) / 12%);
     color: var(--muted);
     font-size: 16px;
     line-height: 1;
     cursor: pointer;
     &:hover {
-      background: rgba(148, 163, 184, 0.22);
+      background: rgb(var(--c-d-rgb) / 22%);
       color: var(--text);
     }
   }
@@ -455,10 +485,7 @@ main {
   margin-bottom: 11px;
 
   path {
-    fill: none;
-    stroke: var(--c-i);
-    stroke-width: 1.5;
-    vector-effect: non-scaling-stroke;
+    @extend %spark-path;
   }
 }
 
@@ -613,19 +640,16 @@ h3 {
   flex: none;
   min-width: 48px;
   text-align: center;
-  font:
-    600 11px 'JetBrains Mono',
-    monospace;
+  @include mono(600, 11px);
+  @extend %accent-pill;
   color: var(--accent);
-  background: rgba(91, 157, 255, 0.1);
-  border: 1px solid rgba(91, 157, 255, 0.2);
   padding: 3px 9px;
   border-radius: 999px;
 
   &.live {
     color: var(--c-r);
-    background: rgba(52, 211, 153, 0.1);
-    border-color: rgba(52, 211, 153, 0.25);
+    background: rgb(var(--c-r-rgb) / 10%);
+    border-color: rgb(var(--c-r-rgb) / 25%);
   }
 }
 
@@ -635,19 +659,19 @@ h3 {
     600 11px 'Inter',
     sans-serif;
   color: var(--text);
-  background: rgba(148, 163, 184, 0.1);
+  background: rgb(var(--c-d-rgb) / 10%);
   border: 1px solid var(--border);
   padding: 4px 10px;
   border-radius: 999px;
   cursor: pointer;
   &:hover {
     border-color: var(--border-strong);
-    background: rgba(148, 163, 184, 0.16);
+    background: rgb(var(--c-d-rgb) / 16%);
   }
 }
 
 .btn {
-  background: rgba(148, 163, 184, 0.07);
+  background: rgb(var(--c-d-rgb) / 7%);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -664,7 +688,7 @@ h3 {
 
   &:hover:not(:disabled) {
     border-color: var(--border-strong);
-    background: rgba(148, 163, 184, 0.13);
+    background: rgb(var(--c-d-rgb) / 13%);
     transform: translateY(-1px);
   }
   &:active:not(:disabled) {
@@ -685,8 +709,8 @@ h3 {
     }
   }
   &.danger:hover {
-    border-color: rgba(244, 63, 94, 0.5);
-    background: rgba(244, 63, 94, 0.12);
+    border-color: rgb(var(--c-i-rgb) / 50%);
+    background: rgb(var(--c-i-rgb) / 12%);
     color: #fda4af;
   }
 
@@ -713,12 +737,11 @@ h3 {
 }
 
 .val {
+  @extend %accent-pill;
   color: var(--accent);
   font-family: 'JetBrains Mono', monospace;
   font-weight: 600;
   font-size: 12px;
-  background: rgba(91, 157, 255, 0.1);
-  border: 1px solid rgba(91, 157, 255, 0.2);
   padding: 2px 8px;
   border-radius: 999px;
   white-space: nowrap;
@@ -737,7 +760,7 @@ h3 {
 
   select,
   input {
-    background: rgba(10, 14, 22, 0.5);
+    background: rgb(var(--bg-rgb) / 50%);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -751,7 +774,7 @@ h3 {
     &:focus {
       outline: none;
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.18);
+      box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 18%);
     }
   }
   select {
@@ -833,7 +856,7 @@ h3 {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--text);
-  background: rgba(16, 22, 36, 0.98);
+  background: rgb(var(--surface-tooltip-rgb) / 98%);
   border: 1px solid var(--border-strong);
   border-radius: 9px;
   box-shadow: var(--shadow);
@@ -870,11 +893,11 @@ input[type='range'] {
     border-radius: 50%;
     background: #fff;
     border: 3px solid var(--accent);
-    box-shadow: 0 0 0 4px rgba(91, 157, 255, 0.18);
+    box-shadow: 0 0 0 4px rgb(var(--accent-rgb) / 18%);
     transition: box-shadow 0.15s ease;
   }
   &::-webkit-slider-thumb:hover {
-    box-shadow: 0 0 0 6px rgba(91, 157, 255, 0.26);
+    box-shadow: 0 0 0 6px rgb(var(--accent-rgb) / 26%);
   }
   &::-moz-range-thumb {
     width: 14px;
@@ -882,7 +905,7 @@ input[type='range'] {
     border-radius: 50%;
     background: #fff;
     border: 3px solid var(--accent);
-    box-shadow: 0 0 0 4px rgba(91, 157, 255, 0.18);
+    box-shadow: 0 0 0 4px rgb(var(--accent-rgb) / 18%);
   }
   &::-moz-range-progress {
     height: 6px;
@@ -901,7 +924,7 @@ input[type='range'] {
 
 .chip {
   position: relative;
-  background: rgba(10, 14, 22, 0.45);
+  background: rgb(var(--bg-rgb) / 45%);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 12px 9px;
@@ -1051,7 +1074,7 @@ input[type='range'] {
   display: inline-flex;
   padding: 3px;
   gap: 2px;
-  background: rgba(10, 14, 22, 0.5);
+  background: rgb(var(--bg-rgb) / 50%);
   border: 1px solid var(--border);
   border-radius: 999px;
 }
@@ -1076,7 +1099,7 @@ input[type='range'] {
   &.on {
     color: #08121f;
     background: var(--accent-grad);
-    box-shadow: 0 2px 8px -3px rgba(91, 157, 255, 0.6);
+    box-shadow: 0 2px 8px -3px rgb(var(--accent-rgb) / 60%);
   }
 }
 
@@ -1096,7 +1119,7 @@ input[type='range'] {
   padding: 0 9px;
   border: 1px solid transparent;
   border-radius: 9px;
-  background: rgba(10, 14, 22, 0.35);
+  background: rgb(var(--bg-rgb) / 35%);
   color: var(--text);
   cursor: pointer;
   overflow: hidden;
@@ -1109,15 +1132,15 @@ input[type='range'] {
   animation: lbIn 0.25s ease;
 
   &:hover {
-    background: rgba(148, 163, 184, 0.12);
+    background: rgb(var(--c-d-rgb) / 12%);
     border-color: var(--border-strong);
   }
   &.sel {
     border-color: var(--accent);
-    background: rgba(91, 157, 255, 0.12);
+    background: rgb(var(--accent-rgb) / 12%);
   }
   &.medal {
-    background: rgba(250, 193, 39, 0.07);
+    background: rgb(var(--seed-rgb) / 7%);
   }
 }
 
@@ -1135,7 +1158,7 @@ input[type='range'] {
   inset: 0 auto 0 0;
   z-index: 0;
   border-radius: 9px;
-  background: linear-gradient(90deg, rgba(244, 63, 94, 0.05), rgba(243, 113, 32, 0.22));
+  background: linear-gradient(90deg, rgb(var(--c-i-rgb) / 5%), rgb(var(--orange-rgb) / 22%));
   pointer-events: none;
   transition: width 0.45s ease;
 }
@@ -1153,9 +1176,7 @@ input[type='range'] {
   width: 20px;
   flex: none;
   text-align: center;
-  font:
-    700 12px 'JetBrains Mono',
-    monospace;
+  @include mono(700, 12px);
   color: var(--muted);
 }
 
@@ -1176,18 +1197,13 @@ input[type='range'] {
   opacity: 0.85;
 
   path {
-    fill: none;
-    stroke: var(--c-i);
-    stroke-width: 1.5;
-    vector-effect: non-scaling-stroke;
+    @extend %spark-path;
   }
 }
 
 .lb-val {
   flex: none;
-  font:
-    600 12px 'JetBrains Mono',
-    monospace;
+  @include mono(600, 12px);
   font-variant-numeric: tabular-nums;
   color: var(--text);
 }
@@ -1196,9 +1212,7 @@ input[type='range'] {
   width: 30px;
   flex: none;
   text-align: right;
-  font:
-    600 11px 'JetBrains Mono',
-    monospace;
+  @include mono(600, 11px);
   color: var(--faint);
 
   &.up {

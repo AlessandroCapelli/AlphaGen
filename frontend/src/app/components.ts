@@ -16,7 +16,7 @@ import {
 import * as echarts from 'echarts';
 import * as L from 'leaflet';
 
-import { PARAM_UI } from './config';
+import { GEO_RETRY_MS, PARAM_UI } from './config';
 import { ConfigService, ParamControl } from './config.service';
 import { CountrySnapshot, Params, Preset, SavedState } from './models';
 import { CompartmentKey, SimulationService } from './simulation.service';
@@ -74,6 +74,46 @@ function heatOpacity(ratio: number): number {
   return 0.25 + 0.7 * heatT(ratio);
 }
 
+/**
+ * Build an SVG sparkline path from a value series, normalised to the given box.
+ *
+ * @param values The series to plot.
+ * @param width Box width in user units (the path spans the full width).
+ * @param baseline Vertical baseline (the y of the lowest point).
+ * @param amplitude Vertical span subtracted from the baseline for the peak.
+ * @param precision Decimal places for each coordinate.
+ * @returns An SVG path string, or '' when the series is too short to draw.
+ */
+function sparkline(
+  values: number[],
+  width: number,
+  baseline: number,
+  amplitude: number,
+  precision: number,
+): string {
+  if (values.length < 2) return '';
+  const max = Math.max(...values, 1);
+  const n = values.length;
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * width;
+    const y = baseline - (values[i] / max) * amplitude;
+    d += `${i === 0 ? 'M' : 'L'}${x.toFixed(precision)} ${y.toFixed(precision)} `;
+  }
+  return d.trim();
+}
+
+/**
+ * Format a count with Italian thousands separators (the UI locale), rounding to
+ * the nearest integer first.
+ *
+ * @param v The value to format.
+ * @returns The rounded value as an `it-IT` localized string.
+ */
+function formatCount(v: number): string {
+  return Math.round(v).toLocaleString('it-IT');
+}
+
 /** One row of the country detail card. */
 interface DetailRow {
   label: string;
@@ -93,6 +133,28 @@ interface CountryDetail {
 }
 
 /**
+ * Paints the filled portion of a range slider with the accent colour up to the
+ * current value, so the position reads at a glance. Min/max are read from the
+ * element; pass the current value (a signal) as `[rangeFill]` so it stays in sync.
+ */
+@Directive({ selector: 'input[type=range][rangeFill]' })
+export class RangeFill {
+  readonly rangeFill = input.required<number>();
+
+  private readonly el = inject(ElementRef).nativeElement as HTMLInputElement;
+
+  constructor() {
+    effect(() => {
+      const v = this.rangeFill();
+      const min = parseFloat(this.el.min || '0');
+      const max = parseFloat(this.el.max || '100');
+      const pct = max > min ? Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100)) : 0;
+      this.el.style.background = `linear-gradient(90deg, var(--accent) ${pct}%, var(--track) ${pct}%)`;
+    });
+  }
+}
+
+/**
  * World map view.
  *
  * Renders a dark base map with a heat choropleth (infection intensity) and
@@ -102,6 +164,7 @@ interface CountryDetail {
  */
 @Component({
   selector: 'app-world-map',
+  imports: [RangeFill],
   template: `
     <div class="map-wrap">
       <div #mapEl class="map"></div>
@@ -143,7 +206,7 @@ interface CountryDetail {
               [max]="lockdown.max"
               [step]="lockdown.step"
               [value]="d.intervention"
-              [style.background]="lockFill(d.intervention)"
+              [rangeFill]="d.intervention"
               [disabled]="viewing()"
               (input)="onLock(d.iso, $event)"
             />
@@ -203,7 +266,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
       population: c.population,
       activePct: pct >= 1 ? `${pct.toFixed(1)}%` : `${pct.toFixed(3)}%`,
       intervention: c.intervention,
-      spark: this.sparkPath(this.sim.seriesFor(c.iso)),
+      spark: sparkline(this.sim.seriesFor(c.iso), 100, 28, 26, 2),
       rows: [
         { label: 'Suscettibili', value: c.s, color: 'var(--c-s)' },
         { label: 'Esposti', value: c.e, color: 'var(--c-e)' },
@@ -235,20 +298,14 @@ export class WorldMap implements AfterViewInit, OnDestroy {
           fillOpacity: heatOpacity(ratio),
         };
         if (id !== this.hoveredIso) {
-          if (id === sel) {
-            style.color = '#ffffff';
-            style.weight = 2.4;
-          } else {
-            const locked = (c?.intervention ?? 0) > 0;
-            style.color = locked ? '#7dd3fc' : 'rgba(255, 255, 255, 0.12)';
-            style.weight = locked ? 1.6 : 0.4;
-          }
+          const locked = (c?.intervention ?? 0) > 0;
+          Object.assign(style, this.borderStyle(id, locked));
         }
         (layer as L.Path).setStyle(style);
         if (id === sel) (layer as L.Path).bringToFront();
         const name = (feat?.properties as { name?: string })?.name ?? '';
         layer.setTooltipContent(
-          `<b>${name}</b><br>${metricLabel}: ${Math.round(value).toLocaleString('it-IT')}<br><i>click = dettagli</i>`,
+          `<b>${name}</b><br>${metricLabel}: ${formatCount(value)}<br><i>click = dettagli</i>`,
         );
       });
 
@@ -342,7 +399,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         }
       }
     } catch {
-      setTimeout(() => this.loadData(map), 1500);
+      setTimeout(() => this.loadData(map), GEO_RETRY_MS);
     }
   }
 
@@ -368,13 +425,7 @@ export class WorldMap implements AfterViewInit, OnDestroy {
         this.hoveredIso = null;
         const c = this.sim.displayed()?.countries.find((x) => x.iso === iso);
         const locked = (c?.intervention ?? 0) > 0;
-        const reset: L.PathOptions =
-          iso === this.sim.selectedIso()
-            ? { weight: 2.4, color: '#ffffff' }
-            : locked
-              ? { weight: 1.6, color: '#7dd3fc' }
-              : { weight: 0.4, color: 'rgba(255, 255, 255, 0.12)' };
-        (e.target as L.Path).setStyle(reset);
+        (e.target as L.Path).setStyle(this.borderStyle(iso, locked));
       },
       click: () => {
         if (iso) this.select(iso);
@@ -389,29 +440,29 @@ export class WorldMap implements AfterViewInit, OnDestroy {
     this.selectedIso.set(iso);
   }
 
+  /**
+   * Resolve the border stroke (colour + weight) for a country path from its
+   * selection and lockdown state: selected → white & 2.4, locked → accent cyan
+   * & 1.6, otherwise faint & 0.4. Fill is decided separately by the caller.
+   *
+   * @param iso ISO3 code of the country whose border is being styled.
+   * @param locked Whether the country currently has a lockdown active.
+   * @returns The border-only `PathOptions` (no fill).
+   */
+  private borderStyle(iso: string, locked: boolean): L.PathOptions {
+    if (iso === this.sim.selectedIso()) return { color: '#ffffff', weight: 2.4 };
+    return locked
+      ? { color: '#7dd3fc', weight: 1.6 }
+      : { color: 'rgba(255, 255, 255, 0.12)', weight: 0.4 };
+  }
+
   /** Seed an outbreak in the given country using the current seed size. */
   protected seedHere(iso: string): void {
     this.sim.seed(iso, this.sim.seedCount());
   }
 
-  /** Format a count with thousands separators. */
-  protected fmt(v: number): string {
-    return Math.round(v).toLocaleString('it-IT');
-  }
-
-  /** Build an SVG path (in a 100×30 box) from a value series; '' if too short. */
-  private sparkPath(values: number[]): string {
-    if (values.length < 2) return '';
-    const max = Math.max(...values, 1);
-    const n = values.length;
-    let d = '';
-    for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * 100;
-      const y = 28 - (values[i] / max) * 26;
-      d += `${i === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)} `;
-    }
-    return d.trim();
-  }
+  /** Format a count with thousands separators (template alias for `formatCount`). */
+  protected readonly fmt = formatCount;
 
   /** Set the lockdown level for the selected country from the slider. */
   protected onLock(iso: string, event: Event): void {
@@ -421,11 +472,6 @@ export class WorldMap implements AfterViewInit, OnDestroy {
   /** Format an intervention level (0..1) as a percentage. */
   protected lockPct(v: number): string {
     return `${Math.round(v * 100)}%`;
-  }
-
-  protected lockFill(v: number): string {
-    const p = Math.max(0, Math.min(100, v * 100));
-    return `linear-gradient(90deg, var(--accent) ${p}%, var(--track) ${p}%)`;
   }
 
   /** Register a directed flight-adjacency entry. */
@@ -701,7 +747,7 @@ export class CountUp {
     const diff = target - from;
     if (Math.abs(diff) < 1) {
       this.shown = target;
-      this.host.textContent = Math.round(target).toLocaleString('it-IT');
+      this.host.textContent = formatCount(target);
       return;
     }
     const t0 = performance.now();
@@ -710,34 +756,11 @@ export class CountUp {
       const p = Math.max(0, Math.min(1, (t - t0) / dur));
       const eased = 1 - Math.pow(1 - p, 3);
       this.shown = from + diff * eased;
-      this.host.textContent = Math.round(this.shown).toLocaleString('it-IT');
+      this.host.textContent = formatCount(this.shown);
       if (p < 1) this.raf = requestAnimationFrame(tick);
       else this.shown = target;
     };
     this.raf = requestAnimationFrame(tick);
-  }
-}
-
-/**
- * Paints the filled portion of a range slider with the accent colour up to the
- * current value, so the position reads at a glance. Min/max are read from the
- * element; pass the current value (a signal) as `[rangeFill]` so it stays in sync.
- */
-@Directive({ selector: 'input[type=range][rangeFill]' })
-export class RangeFill {
-  /** Current slider value (drives the fill width). */
-  readonly rangeFill = input.required<number>();
-
-  private readonly el = inject(ElementRef).nativeElement as HTMLInputElement;
-
-  constructor() {
-    effect(() => {
-      const v = this.rangeFill();
-      const min = parseFloat(this.el.min || '0');
-      const max = parseFloat(this.el.max || '100');
-      const pct = max > min ? Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100)) : 0;
-      this.el.style.background = `linear-gradient(90deg, var(--accent) ${pct}%, var(--track) ${pct}%)`;
-    });
   }
 }
 
@@ -904,7 +927,7 @@ export class Leaderboard {
       display: this.format(e.value, metric),
       fill: e.value / lead,
       delta: (this.baseline.get(e.iso) ?? i + 1) - (i + 1),
-      spark: this.spark(series.get(e.iso) ?? []),
+      spark: sparkline(series.get(e.iso) ?? [], 60, 18, 16, 1),
     }));
   });
 
@@ -935,7 +958,7 @@ export class Leaderboard {
 
   private format(v: number, m: LbMetric): string {
     if (m === 'pct') return `${v * 100 >= 1 ? (v * 100).toFixed(1) : (v * 100).toFixed(2)}%`;
-    return Math.round(v).toLocaleString('it-IT');
+    return formatCount(v);
   }
 
   protected medal(rank: number): string {
@@ -946,20 +969,6 @@ export class Leaderboard {
     if (delta > 0) return `▲${delta}`;
     if (delta < 0) return `▼${-delta}`;
     return '·';
-  }
-
-  /** Build a sparkline path inside a 60×20 box from an active-case series. */
-  private spark(values: number[]): string {
-    if (values.length < 2) return '';
-    const max = Math.max(...values, 1);
-    const n = values.length;
-    let d = '';
-    for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * 60;
-      const y = 18 - (values[i] / max) * 16;
-      d += `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)} `;
-    }
-    return d.trim();
   }
 }
 
@@ -1009,7 +1018,7 @@ export class WorldTotals {
   private readonly sim = inject(SimulationService);
   protected readonly chips = TOTALS_CHIPS;
   /** Worldwide totals of the displayed frame (live or scrubbed). */
-  protected readonly totals = computed(() => this.sim.totals());
+  protected readonly totals = this.sim.totals;
   /** Which compartments are currently shown on the map. */
   protected readonly states = this.sim.mapStates;
 

@@ -10,7 +10,7 @@
 		"uiMax": 30,
 		"uiStep": 1
 	},
-	"lockdown": { "min": 0, "max": 1, "step": 0.05 },
+	"lockdown": { "default": 0, "min": 0, "max": 1, "step": 0.05 },
 	"params": [
 		{
 			"key": "r0",

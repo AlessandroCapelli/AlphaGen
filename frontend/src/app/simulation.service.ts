@@ -2,7 +2,7 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
-import { API_BASE, RECONNECT_MS, WS_URL } from './config';
+import { API_BASE, RECONNECT_MS, SPARKLINE_POINTS, WS_URL } from './config';
 import { ConfigService } from './config.service';
 import {
   CountryMeta,
@@ -28,6 +28,9 @@ export const COMPARTMENT_LABELS: readonly { key: CompartmentKey; label: string }
   { key: 'd', label: 'Dec.' },
   { key: 'v', label: 'Vacc.' },
 ];
+
+/** Compartment keys in canonical display order (derived from the labels). */
+const COMPARTMENTS = COMPARTMENT_LABELS.map((c) => c.key) as readonly CompartmentKey[];
 
 /** Compact columnar timeline frames sent on connect (see backend `frames_payload`). */
 interface ColumnarFrames {
@@ -173,23 +176,24 @@ export class SimulationService {
   readonly totals = computed<Totals | null>(() => {
     const t = this.displayed()?.totals;
     if (!t) return null;
-    return {
-      s: Math.max(0, t.s),
-      e: Math.max(0, t.e),
-      i: Math.max(0, t.i),
-      r: Math.max(0, t.r),
-      d: Math.max(0, t.d),
-      v: Math.max(0, t.v),
-    };
+    return COMPARTMENTS.reduce((acc, k) => {
+      acc[k] = Math.max(0, t[k]);
+      return acc;
+    }, {} as Totals);
   });
 
-  /** Open the WebSocket connection. Idempotent: a no-op if already connected. */
-  connect(): void {
-    if (this.socket) return;
+  /** Cancel any pending reconnect timer. */
+  private clearReconnect(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
+  }
+
+  /** Open the WebSocket connection. Idempotent: a no-op if already connected. */
+  connect(): void {
+    if (this.socket) return;
+    this.clearReconnect();
     const ws = new WebSocket(WS_URL);
     this.socket = ws;
     ws.onopen = () => {
@@ -199,7 +203,7 @@ export class SimulationService {
     ws.onclose = () => {
       this.connected.set(false);
       this.socket = undefined;
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.clearReconnect();
       this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
     };
     ws.onerror = () => ws.close();
@@ -322,12 +326,9 @@ export class SimulationService {
   mapMetric(c: CountrySnapshot): number {
     const m = this.mapStates();
     let v = 0;
-    if (m.s) v += c.s;
-    if (m.e) v += c.e;
-    if (m.i) v += c.i;
-    if (m.r) v += c.r;
-    if (m.d) v += c.d;
-    if (m.v) v += c.v;
+    for (const k of COMPARTMENTS) {
+      if (m[k]) v += c[k];
+    }
     return v;
   }
 
@@ -354,7 +355,7 @@ export class SimulationService {
    * @param isos Countries to extract (typically the leaderboard's top N).
    * @param points Target number of sampled points per series.
    */
-  activeSeries(isos: string[], points = 28): Map<string, number[]> {
+  activeSeries(isos: string[], points = SPARKLINE_POINTS): Map<string, number[]> {
     this.frameTick();
     const want = new Set(isos);
     const out = new Map<string, number[]>(isos.map((iso) => [iso, []]));
@@ -441,8 +442,9 @@ export class SimulationService {
   }
 
   /**
-   * Export the COMPLETE state: the frame buffer (timeline) plus the chart
-   * series. The series is stored explicitly so a client connected mid-run still round-trips its full chart history.
+   * Export the complete state: the frame buffer (timeline) plus the chart
+   * series. The series is stored explicitly so a client connected mid-run
+   * still round-trips its full chart history.
    */
   exportState(): SavedState {
     return { version: this.cfg.saveVersion, frames: this.frames, history: this.history() };

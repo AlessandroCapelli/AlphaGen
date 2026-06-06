@@ -144,8 +144,9 @@ export interface Scenario {
 
 /**
  * A complete saved simulation: the full frame buffer (timeline). The current
- * live state and the map replay are derived from it. The chart series
- * is stored explicitly too, so a client that connected mid-run still round-trips its full chart history.
+ * live state and the map replay are derived from it. The chart series is stored
+ * explicitly as well, so a client that connected mid-run still round-trips its
+ * full chart history.
  */
 export interface SavedState {
   /** File-format version. */
@@ -190,7 +191,7 @@ export interface AppConfig {
   /** Auto-advance speed: engine clamp (min/max) + slider spec (uiMin/uiMax/uiStep). */
   speed: { default: number; min: number; max: number; uiMin: number; uiMax: number; uiStep: number };
   /** Per-country lockdown slider spec. */
-  lockdown: { min: number; max: number; step: number };
+  lockdown: { default: number; min: number; max: number; step: number };
   /** Epidemiological parameters, in canonical order. */
   params: ParamSpec[];
   /** Compartments composing the default map heat metric. */
